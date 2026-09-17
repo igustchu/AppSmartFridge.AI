@@ -4,6 +4,12 @@ import 'profile_screen.dart';
 import 'ImageScanning.dart';
 import 'inventory_screen.dart';
 import 'ai_recipe_screen.dart';
+import 'scan_recipe_result_screen.dart';
+import 'weekly_plan_screen.dart';
+import 'meal_plan_screen.dart';
+import 'plan_menu_screen.dart';
+import 'expiration_alert_screen.dart';
+import 'scan_recipe_screen.dart';
 
 class MainMenuScreen extends StatefulWidget {
   const MainMenuScreen({super.key});
@@ -17,12 +23,18 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
   final supabase = Supabase.instance.client;
 
   String userName = "User";
+  int totalItems = 0;
+
+  int nearExpiryItems = 0;
+
+  int expiredItems = 0;
 
   @override
   void initState() {
     super.initState();
 
     loadUser();
+    loadExpiryStatus();
   }
 
   @override
@@ -54,6 +66,53 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
           userName = "$firstName $lastName";
         });
       }
+    }
+  }
+
+  Future<void> loadExpiryStatus() async {
+    final user = supabase.auth.currentUser;
+
+    if (user == null) {
+      return;
+    }
+
+    final response = await supabase
+        .from('fridge_items')
+        .select('expiry_date')
+        .eq('user_id', user.id);
+
+    int total = response.length;
+
+    int near = 0;
+
+    int expired = 0;
+
+    final now = DateTime.now();
+
+    for (var item in response) {
+      if (item['expiry_date'] == null) {
+        continue;
+      }
+
+      final expiry = DateTime.parse(item['expiry_date']);
+
+      final difference = expiry.difference(now).inDays;
+
+      if (difference < 0) {
+        expired++;
+      } else if (difference <= 3) {
+        near++;
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        totalItems = total;
+
+        nearExpiryItems = near;
+
+        expiredItems = expired;
+      });
     }
   }
 
@@ -161,15 +220,19 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
 
                     child: Row(
                       children: [
-                        stat("24", "รายการ", Colors.green),
+                        stat(totalItems.toString(), "รายการ", Colors.green),
 
                         divider(),
 
-                        stat("3", "ใกล้หมดอายุ", Colors.orange),
+                        stat(
+                          nearExpiryItems.toString(),
+                          "ใกล้หมดอายุ",
+                          Colors.orange,
+                        ),
 
                         divider(),
 
-                        stat("1", "หมดแล้ว", Colors.red),
+                        stat(expiredItems.toString(), "หมดแล้ว", Colors.red),
                       ],
                     ),
                   ),
@@ -250,12 +313,49 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
                               );
                             }
 
+                            if (index == 1) {
+
+  Navigator.push(
+
+    context,
+
+    MaterialPageRoute(
+
+      builder: (_) => const PlanMenuScreen(),
+
+    ),
+
+  );
+
+}
+if (index == 2) {
+
+  Navigator.push(
+    context,
+
+    MaterialPageRoute(
+      builder: (_) => const ExpirationAlertScreen(),
+    ),
+
+  );
+
+}
+
                             if (index == 3) {
                               Navigator.push(
                                 context,
 
                                 MaterialPageRoute(
                                   builder: (_) => const InventoryScreen(),
+                                ),
+                              );
+                            }
+
+                            if (index == 4) {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => const ScanRecipeScreen(),
                                 ),
                               );
                             }

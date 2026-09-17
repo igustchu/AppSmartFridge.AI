@@ -4,7 +4,7 @@ import 'package:app_links/app_links.dart';
 
 import 'package:test_app/screens/login_screen.dart';
 import 'package:test_app/screens/reset_password_screen.dart';
-
+import 'services/notification_service.dart';
 
 
 final GlobalKey<NavigatorState> navigatorKey =
@@ -16,9 +16,7 @@ GlobalKey<NavigatorState>();
 
 Future<void> main() async {
 
-
   WidgetsFlutterBinding.ensureInitialized();
-
 
 
   await Supabase.initialize(
@@ -30,13 +28,22 @@ Future<void> main() async {
   );
 
 
+  await NotificationService.init();
+
+
+await Future.delayed(
+  const Duration(seconds: 3)
+);
+
+
+
+
+
+
 
   runApp(
-
     const MyApp(),
-
   );
-
 
 }
 
@@ -257,8 +264,12 @@ class _MyAppState extends State<MyApp> {
 
 
 
+        // ฟอนต์ตรงตามดีไซน์ Figma (Inter) แทนของเดิมที่พิมพ์ชื่อฟอนต์ผิด
+        // จน Flutter มองไม่เห็นและใช้ฟอนต์ default ของเครื่องแทนมาตลอด
+        // ใช้ไฟล์ฟอนต์ที่แนบมากับแอปเอง (ประกาศไว้ใน pubspec.yaml) แทนการให้
+        // google_fonts โหลดจากเน็ตตอนเปิดแอป เพื่อไม่ให้พลาดกรณีไม่มีอินเทอร์เน็ต
         fontFamily:
-        'Sans-serif',
+        'Inter',
 
 
 

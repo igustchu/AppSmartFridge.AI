@@ -1,13 +1,20 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart'; // Import Supabase
-import '../widgets/custom_header.dart';
-import 'inventory_screen.dart'; // Import หน้า Inventory
+import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../utils/category_icons.dart';
+import '../widgets/app_icons.dart';
+import '../widgets/recipe_flow_widgets.dart';
+import 'inventory_screen.dart';
+
+/// หน้าผลลัพธ์หลังสแกนวัตถุดิบ (ตามดีไซน์ใน Figma: "SCAN" - ผลลัพธ์)
+/// รูปที่แสดงในการ์ด "รูปภาพ" คือรูปจริงที่ผู้ใช้ถ่าย/เลือกมา (ไม่ใช่รูป mock)
 class ResultScreen extends StatefulWidget {
-  // รับข้อมูลเป็น List เพื่อรองรับวัตถุดิบหลายชิ้นพร้อมกัน
   final List<dynamic> foundItems;
+  final Uint8List? imageBytes;
 
-  const ResultScreen({super.key, required this.foundItems});
+  const ResultScreen({super.key, required this.foundItems, this.imageBytes});
 
   @override
   State<ResultScreen> createState() => _ResultScreenState();
@@ -17,106 +24,220 @@ class _ResultScreenState extends State<ResultScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFFFF9E6), // สีพื้นหลังครีม
-      body: Column(
-        children: [
-          // --- ส่วนหัว (Header) ---
-          CustomHeader(
-            title: "Result",
-            subtitle: "พบวัตถุดิบ ${widget.foundItems.length} รายการ",
-            showBack: true,
-          ),
+      backgroundColor: const Color(0xFFD8EEFF),
+      body: SafeArea(
+        child: Column(
+          children: [
+            const IngredientFlowHeader(title: "ผลลัพธ์"),
+            const SizedBox(height: 15),
 
-          // --- รายการวัตถุดิบ (List) ---
-          Expanded(
-            child: widget.foundItems.isEmpty
-                ? const Center(child: Text("ไม่พบวัตถุดิบ"))
-                : ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                    itemCount: widget.foundItems.length,
-                    itemBuilder: (context, index) {
-                      // ส่งข้อมูลทีละชิ้นไปสร้างการ์ด
-                      // และส่ง Callback function เพื่อรับค่าที่แก้ไขกลับมาอัปเดต List หลัก
-                      return IngredientCardItem(
-                        initialData:
-                            widget.foundItems[index] as Map<String, dynamic>,
-                        onUpdate: (key, value) {
-                          // อัปเดตข้อมูลใน List หลักทันทีที่มีการแก้ไขในการ์ดลูก
-                          widget.foundItems[index][key] = value;
-                        },
-                      );
-                    },
-                  ),
-          ),
-
-          // --- ปุ่มกดด้านล่าง (Footer) ---
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black12,
-                  blurRadius: 10,
-                  offset: Offset(0, -2),
+            // --- ป้ายบอกจำนวนวัตถุดิบที่พบ ---
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20.0),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Colors.black12,
+                      blurRadius: 4,
+                      offset: Offset(0, 2),
+                    ),
+                  ],
                 ),
-              ],
+                child: Text(
+                  "พบวัตถุดิบ ${widget.foundItems.length} รายการ",
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                    color: Colors.black87,
+                  ),
+                ),
+              ),
             ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton(
-                    onPressed: () => Navigator.pop(context),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.grey[300],
-                      foregroundColor: Colors.black,
-                      elevation: 0,
-                      padding: const EdgeInsets.symmetric(vertical: 15),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+            const SizedBox(height: 12),
+
+            // --- การ์ด "รูปภาพ" (รูปจริงที่ถ่าย/เลือกมาสแกน) ---
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20.0),
+              child: Container(
+                width: double.infinity,
+                // เพิ่มความสูงจาก 200 เป็น 320 เพื่อให้มีที่พอแสดงรูปเต็มๆ
+                // ไม่ต้องครอปแน่นจนเกินไป (ของเดิมกล่องเตี้ยเกินไปเทียบกับรูปโหมด
+                // แนวตั้งจากกล้อง ทำให้ครอปหายไปเยอะ)
+                height: 320,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Colors.black12,
+                      blurRadius: 4,
+                      offset: Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFFCDC),
+                        border: Border.all(color: const Color(0xFFFFD191)),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Text(
+                        "รูปภาพ",
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                          color: Colors.black87,
+                        ),
                       ),
                     ),
-                    child: const Text("สแกนใหม่"),
-                  ),
-                ),
-                const SizedBox(width: 15),
-                Expanded(
-                  child: ElevatedButton(
-                    onPressed: _saveToSupabase, // เรียกฟังก์ชันบันทึก
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.orange,
-                      foregroundColor: Colors.white,
-                      elevation: 0,
-                      padding: const EdgeInsets.symmetric(vertical: 15),
-                      shape: RoundedRectangleBorder(
+                    const SizedBox(height: 10),
+                    Expanded(
+                      child: ClipRRect(
                         borderRadius: BorderRadius.circular(12),
+                        child: Container(
+                          width: double.infinity,
+                          alignment: Alignment.center,
+                          // พื้นหลังสีเทาอ่อนไว้รองรับรูปที่สัดส่วนไม่พอดีกรอบ
+                          // (BoxFit.contain จะไม่ครอปรูปแต่จะเห็นแถบพื้นหลังนี้แทน)
+                          color: Colors.grey.shade100,
+                          child: widget.imageBytes != null
+                              ? Image.memory(
+                                  widget.imageBytes!,
+                                  width: double.infinity,
+                                  height: double.infinity,
+                                  // เปลี่ยนจาก cover เป็น contain เพื่อให้เห็นรูปที่ถ่ายมา
+                                  // แบบเต็มๆ ไม่ถูกครอปขอบออกเหมือนก่อนหน้านี้
+                                  fit: BoxFit.contain,
+                                )
+                              : Icon(
+                                  Icons.image_outlined,
+                                  size: 36,
+                                  color: Colors.grey.shade400,
+                                ),
+                        ),
                       ),
                     ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: const [
-                        Icon(Icons.check, size: 20),
-                        SizedBox(width: 5),
-                        Text("บันทึกทั้งหมด"),
-                      ],
-                    ),
-                  ),
+                  ],
                 ),
-              ],
+              ),
             ),
-          ),
-        ],
+            const SizedBox(height: 12),
+
+            // --- รายการวัตถุดิบ (List) ---
+            Expanded(
+              child: widget.foundItems.isEmpty
+                  ? const Center(
+                      child: Text(
+                        "ไม่พบวัตถุดิบ",
+                        style: TextStyle(color: Colors.black54, fontSize: 16),
+                      ),
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.fromLTRB(20, 5, 20, 0),
+                      itemCount: widget.foundItems.length,
+                      itemBuilder: (context, index) {
+                        return IngredientCardItem(
+                          initialData:
+                              widget.foundItems[index] as Map<String, dynamic>,
+                          onUpdate: (key, value) {
+                            widget.foundItems[index][key] = value;
+                          },
+                        );
+                      },
+                    ),
+            ),
+
+            // --- ปุ่มกดด้านล่าง (Footer) ---
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 10, 20, 15),
+              child: Container(
+                padding: const EdgeInsets.all(15),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Colors.black12,
+                      blurRadius: 10,
+                      offset: Offset(0, -2),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () => Navigator.pop(context),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFB6B6B6),
+                          foregroundColor: Colors.black87,
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(vertical: 13),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                        child: const Text(
+                          "สแกนใหม่",
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 15),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: _saveToSupabase,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFD7EDFF),
+                          foregroundColor: Colors.black87,
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(vertical: 13),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: const [
+                            CheckIcon(size: 18),
+                            SizedBox(width: 5),
+                            Text(
+                              "บันทึกทั้งหมด",
+                              style: TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   // --- ฟังก์ชันบันทึกลง Database ---
-  // --- ฟังก์ชันบันทึกลง Database ---
   Future<void> _saveToSupabase() async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
 
-    // ✅ 1. เช็คก่อนว่าล็อกอินหรือยัง
     if (user == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -124,38 +245,53 @@ class _ResultScreenState extends State<ResultScreen> {
           backgroundColor: Colors.red,
         ),
       );
-      return; // หยุดการทำงานทันทีถ้ายังไม่ล็อกอิน
+      return;
     }
 
-    // แสดง Loading
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => const Center(child: CircularProgressIndicator()),
+      builder: (ctx) =>
+          const Center(child: CircularProgressIndicator(color: Colors.blue)),
     );
 
     try {
-      // 2. วนลูปข้อมูลทั้งหมดเพื่อเตรียมบันทึก
       for (var item in widget.foundItems) {
-        int days = int.tryParse(item['expiry_days'].toString()) ?? 7;
-        DateTime expiryDate = DateTime.now().add(Duration(days: days));
+        String name = item['name'];
 
-        // ✅ 3. ส่ง user_id ไปด้วยเพื่อความชัวร์ (ถึง DB จะทำให้แล้วก็เถอะ)
-        await supabase.from('ingredients').insert({
-          'user_id': user.id, // ✅ สำคัญมาก
-          'name': item['name'],
-          'category': item['category'],
-          'quantity': item['quantity'],
-          'max_quantity': item['quantity'],
-          'unit': item['unit'],
-          'expiry_date': expiryDate.toIso8601String(),
-        });
+        final existingItem = await supabase
+            .from('fridge_items')
+            .select('item_id, quantity')
+            .eq('user_id', user.id)
+            .eq('name', name)
+            .maybeSingle();
+
+        if (existingItem != null) {
+          int newQuantity =
+              (existingItem['quantity'] ?? 0) + (item['quantity'] as int);
+
+          await supabase
+              .from('fridge_items')
+              .update({'quantity': newQuantity})
+              .eq('item_id', existingItem['item_id']);
+        } else {
+          int days = int.tryParse(item['expiry_days'].toString()) ?? 7;
+          DateTime expiryDate = DateTime.now().add(Duration(days: days));
+
+          await supabase.from('fridge_items').insert({
+            'user_id': user.id,
+            'name': name,
+            'category': item['category'],
+            'quantity': item['quantity'],
+            'max_quantity': item['quantity'],
+            'unit': item['unit'],
+            'expiry_date': expiryDate.toIso8601String(),
+          });
+        }
       }
 
-      // ปิด Loading
       if (mounted) Navigator.pop(context);
 
-      // ไปหน้า Inventory
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -171,7 +307,7 @@ class _ResultScreenState extends State<ResultScreen> {
         );
       }
     } catch (e) {
-      if (mounted) Navigator.pop(context); // ปิด Loading
+      if (mounted) Navigator.pop(context);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -189,7 +325,6 @@ class _ResultScreenState extends State<ResultScreen> {
 // ==================================================================
 class IngredientCardItem extends StatefulWidget {
   final Map<String, dynamic> initialData;
-  // Callback เพื่อส่งค่ากลับไป Parent เมื่อมีการแก้ไข
   final Function(String key, dynamic value) onUpdate;
 
   const IngredientCardItem({
@@ -214,7 +349,6 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
     super.initState();
     final data = widget.initialData;
 
-    // กำหนดค่าเริ่มต้น
     nameController = TextEditingController(text: data['name'] ?? '');
 
     int days = 7;
@@ -225,9 +359,10 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
 
     quantity = (data['quantity'] is int) ? data['quantity'] : 1;
     unit = data['unit'] ?? 'ชิ้น';
-    category = data['category'] ?? 'อื่นๆ';
+    // กันเหนียว: normalize หมวดหมู่ให้เข้าเซ็ตที่กำหนดไว้เสมอ (fixedCategories)
+    // เผื่อ AI ตอบมาไม่ตรงเป๊ะ หรือเป็นข้อมูลเก่าก่อนแก้ไขนี้
+    category = normalizeCategory((data['category'] ?? 'อื่นๆ').toString());
 
-    // เพิ่ม Listener ให้ TextController เพื่อส่งค่ากลับเมื่อพิมพ์เสร็จ
     nameController.addListener(() {
       widget.onUpdate('name', nameController.text);
     });
@@ -245,17 +380,8 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
     super.dispose();
   }
 
-  // ฟังก์ชันเลือก Emoji
-  String _getEmoji(String cat) {
-    if (cat.contains('ผัก')) return '🥬';
-    if (cat.contains('ผลไม้')) return '🍎';
-    if (cat.contains('เนื้อ') || cat.contains('ไก่') || cat.contains('หมู')) {
-      return '🥩';
-    }
-    if (cat.contains('นม') || cat.contains('น้ำ')) return '🥛';
-    if (cat.contains('ขนม')) return '🍪';
-    return '🍽️';
-  }
+  // ใช้ mapping กลางเดียวกับหน้าคลัง (Inventory) เพื่อให้อิโมจิหมวดหมู่ตรงกันทุกหน้า
+  String _getEmoji(String cat) => categoryEmoji(cat);
 
   @override
   Widget build(BuildContext context) {
@@ -269,7 +395,7 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(20),
         boxShadow: const [
           BoxShadow(color: Colors.black12, blurRadius: 4, offset: Offset(0, 2)),
         ],
@@ -277,25 +403,35 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 1. ส่วนหัว: หมวดหมู่และ Emoji
+          // 1. ส่วนหัว: หมวดหมู่ (เลือกได้จากรายการที่กำหนดไว้เท่านั้น) และ Emoji
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 12),
                 decoration: BoxDecoration(
-                  color: Colors.orange.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.orange.withOpacity(0.3)),
+                  color: const Color(0xFFFFFCDC),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: const Color(0xFFFFD191)),
                 ),
-                child: Text(
-                  category,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: Colors.deepOrange,
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<String>(
+                    value: category,
+                    isDense: true,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.black87,
+                    ),
+                    items: fixedCategories
+                        .map(
+                          (c) => DropdownMenuItem(value: c, child: Text(c)),
+                        )
+                        .toList(),
+                    onChanged: (val) {
+                      if (val == null) return;
+                      setState(() => category = val);
+                      widget.onUpdate('category', val);
+                    },
                   ),
                 ),
               ),
@@ -308,15 +444,26 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
           // 2. ชื่อวัตถุดิบ
           const Text(
             "ชื่อวัตถุดิบ",
-            style: TextStyle(color: Colors.black87, fontSize: 13),
+            style: TextStyle(
+              color: Colors.black87,
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+            ),
           ),
           const SizedBox(height: 5),
           TextFormField(
             controller: nameController,
             decoration: InputDecoration(
               isDense: true,
+              filled: true,
+              fillColor: Colors.grey[50],
               border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(color: Colors.grey.shade300),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(color: Colors.grey.shade300),
               ),
               contentPadding: const EdgeInsets.symmetric(
                 horizontal: 12,
@@ -330,14 +477,12 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
           // 3. ปริมาณและหน่วย
           Row(
             children: [
-              // ปุ่มลบ
               _buildCounterButton("-", () {
                 if (quantity > 1) {
                   setState(() => quantity--);
-                  widget.onUpdate('quantity', quantity); // ส่งค่ากลับ
+                  widget.onUpdate('quantity', quantity);
                 }
               }),
-              // ตัวเลข
               Container(
                 width: 50,
                 alignment: Alignment.center,
@@ -346,22 +491,20 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
                   style: const TextStyle(
                     fontWeight: FontWeight.bold,
                     fontSize: 18,
-                    color: Colors.orange,
+                    color: Colors.black87,
                   ),
                 ),
               ),
-              // ปุ่มบวก
               _buildCounterButton("+", () {
                 setState(() => quantity++);
-                widget.onUpdate('quantity', quantity); // ส่งค่ากลับ
+                widget.onUpdate('quantity', quantity);
               }),
 
               const SizedBox(width: 15),
 
-              // Dropdown หน่วย
               Expanded(
                 child: DropdownButtonFormField<String>(
-                  initialValue:
+                  value:
                       [
                         "ชิ้น",
                         "กรัม",
@@ -375,12 +518,19 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
                       : "ชิ้น",
                   decoration: InputDecoration(
                     isDense: true,
+                    filled: true,
+                    fillColor: Colors.grey[50],
                     contentPadding: const EdgeInsets.symmetric(
                       horizontal: 10,
-                      vertical: 10,
+                      vertical: 12,
                     ),
                     border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: Colors.grey.shade300),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: Colors.grey.shade300),
                     ),
                   ),
                   items: ["ชิ้น", "กรัม", "กก.", "แพ็ค", "ขวด", "ลูก", "ฟอง"]
@@ -388,7 +538,7 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
                       .toList(),
                   onChanged: (val) {
                     setState(() => unit = val!);
-                    widget.onUpdate('unit', val); // ส่งค่ากลับ
+                    widget.onUpdate('unit', val);
                   },
                 ),
               ),
@@ -401,8 +551,9 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: const Color(0xFFFFF9C4),
-              borderRadius: BorderRadius.circular(10),
+              color: const Color(0xFFFFFCDC),
+              border: Border.all(color: const Color(0xFFFFD191)),
+              borderRadius: BorderRadius.circular(15),
             ),
             child: Row(
               children: [
@@ -419,7 +570,10 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
                         child: TextFormField(
                           controller: expiryController,
                           keyboardType: TextInputType.number,
-                          style: const TextStyle(fontWeight: FontWeight.bold),
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: Colors.black87,
+                          ),
                           decoration: const InputDecoration(
                             border: InputBorder.none,
                             isDense: true,
@@ -431,7 +585,7 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
                     ],
                   ),
                 ),
-                Container(width: 1, height: 30, color: Colors.grey[300]),
+                Container(width: 1, height: 30, color: const Color(0xFFFFD191)),
                 const SizedBox(width: 10),
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
@@ -444,7 +598,7 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
                       expiryDateString,
                       style: const TextStyle(
                         fontWeight: FontWeight.bold,
-                        color: Colors.redAccent,
+                        color: Color(0xFFE62020),
                       ),
                     ),
                   ],
@@ -457,25 +611,24 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
     );
   }
 
-  // Helper สร้างปุ่ม + -
   Widget _buildCounterButton(String icon, VoidCallback onTap) {
     return InkWell(
       onTap: onTap,
       child: Container(
-        width: 35,
-        height: 35,
+        width: 38,
+        height: 38,
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: Colors.orange[50],
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.orange.withOpacity(0.3)),
+          color: const Color(0xFFFFFCDC),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: const Color(0xFFFFD191)),
         ),
         child: Text(
           icon,
           style: const TextStyle(
             fontWeight: FontWeight.bold,
             fontSize: 20,
-            color: Colors.deepOrange,
+            color: Colors.black87,
           ),
         ),
       ),

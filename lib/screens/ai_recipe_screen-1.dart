@@ -98,7 +98,7 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
     try {
       // ⚠️ ใส่ API Key ของคุณที่นี่
       final String apiKey = '';
-      final model = GenerativeModel(model: 'gemini-3.6-flash', apiKey: apiKey);
+      final model = GenerativeModel(model: 'gemini-2.5-flash', apiKey: apiKey);
 
       // เตรียมรายชื่อวัตถุดิบเป็น Text
       String allItems = _inventory
