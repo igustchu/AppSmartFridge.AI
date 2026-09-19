@@ -39,5 +39,16 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
+    # permission_handler ปิดโค้ดของสิทธิ์แต่ละประเภทไว้เป็นค่าเริ่มต้น
+    # (compile-time flag) ถ้าไม่เปิด PERMISSION_NOTIFICATIONS ตรงนี้
+    # Permission.notification.status/.request() จะไม่ทำงานถูกต้อง แม้ผู้ใช้
+    # จะเปิดอนุญาตแจ้งเตือนไว้ใน Settings ของเครื่องแล้วก็ตาม (นี่คือสาเหตุที่
+    # ปุ่ม "ทดสอบการแจ้งเตือนตอนนี้" ในแอปยังขึ้นว่า "ยังไม่ได้รับสิทธิ์"
+    # ทั้งๆ ที่ Settings > Test App > Notifications เปิดไว้แล้ว)
+    target.build_configurations.each do |config|
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] << 'PERMISSION_NOTIFICATIONS=1'
+    end
   end
 end

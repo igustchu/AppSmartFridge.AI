@@ -8,6 +8,7 @@ import '../widgets/app_icons.dart';
 
 import 'package:google_generative_ai/google_generative_ai.dart';
 import 'dart:convert';
+import '../config/api_keys.dart';
 
 
 
@@ -36,7 +37,7 @@ class _MealPlanScreenState
 
 
  
-  final String apiKey = '';
+  final String apiKey = ApiKeys.gemini;
 
 
 
@@ -155,6 +156,14 @@ class _MealPlanScreenState
       final expiringSoon = <Map<String, dynamic>>[];
 
       for (var item in fridgeItems) {
+        // ถ้าใช้วัตถุดิบชิ้นนี้หมดแล้ว (เหลือ 0) ก็ไม่ควรเสนอให้ AI ใช้/เตือน
+        // ว่าใกล้หมดอายุอีก เพราะไม่มีของเหลือให้ต้องรีบใช้แล้ว
+        final qty = item['quantity'];
+        if (qty != null) {
+          final qtyNum = qty is num ? qty : num.tryParse(qty.toString());
+          if (qtyNum != null && qtyNum <= 0) continue;
+        }
+
         if (item['expiry_date'] != null) {
           final expiry = DateTime.parse(item['expiry_date']);
           final diff = expiry.difference(now).inDays;
@@ -1371,7 +1380,7 @@ ${usedNames.isEmpty ? "" : "ห้ามสร้างเมนูซ้ำก�
 
 
           backgroundColor:
-          const Color(0xffffd84d),
+          const Color(0xFFFFF7D0),
 
 
 

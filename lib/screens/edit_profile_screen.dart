@@ -141,7 +141,8 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                   onPressed: loading ? null : saveProfile,
 
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xff5189C9),
+                    // ปุ่มสีฟ้าทุกปุ่มในแอปต้องใช้รหัสสี #D7EDFF ตามที่กำหนด
+                    backgroundColor: const Color(0xffD7EDFF),
 
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(20),
@@ -149,14 +150,14 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                   ),
 
                   child: loading
-                      ? const CircularProgressIndicator(color: Colors.white)
+                      ? const CircularProgressIndicator(color: Colors.black87)
                       : const Text(
                           "บันทึก",
 
                           style: TextStyle(
                             fontSize: 18,
 
-                            color: Colors.white,
+                            color: Colors.black87,
 
                             fontWeight: FontWeight.bold,
                           ),

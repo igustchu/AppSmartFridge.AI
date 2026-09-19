@@ -4,6 +4,7 @@ import 'item_detail_screen.dart';
 import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
 import '../utils/category_icons.dart';
+import '../services/notification_service.dart';
 
 class InventoryScreen extends StatefulWidget {
   const InventoryScreen({super.key});
@@ -17,10 +18,22 @@ class _InventoryScreenState extends State<InventoryScreen> {
   List<Map<String, dynamic>> _inventoryItems = [];
   bool _isLoading = true;
 
+  // ช่องค้นหาวัตถุดิบด้านบน — เดิมเป็นแค่ TextField เปล่าๆ พิมพ์แล้วไม่มีอะไร
+  // เกิดขึ้นเลย ตอนนี้ผูกกับ state จริง พิมพ์แล้วต้องกรองรายการวัตถุดิบจริง
+  // จากคลังให้ขึ้นมา
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
+
   @override
   void initState() {
     super.initState();
     _fetchInventoryData();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   Future<void> _fetchInventoryData() async {
@@ -37,6 +50,12 @@ class _InventoryScreenState extends State<InventoryScreen> {
       setState(() {
         _inventoryItems = List<Map<String, dynamic>>.from(response);
       });
+
+      // ทุกครั้งที่โหลด/รีเฟรชคลัง ให้ซิงก์แจ้งเตือนวันหมดอายุใหม่ให้ตรงกับ
+      // ของจริงในคลังตอนนี้ (ของที่ถูกลบ/ทำอาหารไปแล้วจะไม่มีแจ้งเตือนค้าง
+      // ของที่เพิ่มใหม่จะได้ตั้งแจ้งเตือนให้ด้วย) ทำแบบไม่ต้องรอ (fire-and-
+      // forget) จะได้ไม่ทำให้หน้าคลังโหลดช้าลง
+      NotificationService.scheduleExpiryReminders().catchError((_) {});
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -94,20 +113,41 @@ class _InventoryScreenState extends State<InventoryScreen> {
               )
               .toList();
 
+    // ถ้ามีการพิมพ์ค้นหา ให้ค้นจากชื่อวัตถุดิบทั้งหมดในคลังจริง (ไม่สนใจว่า
+    // ตอนนี้อยู่ในมุมมองหมวดหมู่ไหน) เทียบแบบไม่สนตัวพิมพ์เล็ก/ใหญ่
+    final String trimmedQuery = _searchQuery.trim().toLowerCase();
+    final bool isSearching = trimmedQuery.isNotEmpty;
+    final List<Map<String, dynamic>> searchResults = isSearching
+        ? _inventoryItems.where((item) {
+            final name = (item['name']?.toString() ?? '').toLowerCase();
+            return name.contains(trimmedQuery);
+          }).toList()
+        : <Map<String, dynamic>>[];
+
     int totalItems = isCategoryView
         ? _inventoryItems.length
         : displayedItems.length;
     int nearExpiryCount = 0;
-    int outOfStockCount = 0;
+    int expiredCount = 0;
 
     for (var item in (isCategoryView ? _inventoryItems : displayedItems)) {
-      if (item['expiry_date'] != null) {
+      final qty = item['quantity'];
+      final qtyNum = qty is num ? qty : num.tryParse(qty?.toString() ?? '');
+      final isUsedUp = qtyNum != null && qtyNum <= 0;
+
+      // ของที่ใช้หมดแล้ว (เหลือ 0 ชิ้น) ไม่ควรถูกนับทั้ง "ใกล้หมดอายุ" และ
+      // "หมดแล้ว" เพราะไม่มีของเหลือให้ต้องพูดถึงวันหมดอายุอีกต่อไป (ปกติแล้ว
+      // พอเหลือ 0 ตอนทำอาหาร ระบบจะลบรายการนี้ออกจากคลังไปเลย)
+      if (!isUsedUp && item['expiry_date'] != null) {
         int diff = DateTime.parse(
           item['expiry_date'].toString(),
         ).difference(DateTime.now()).inDays;
-        if (diff >= 0 && diff <= 3) nearExpiryCount++;
+        if (diff < 0) {
+          expiredCount++;
+        } else if (diff <= 3) {
+          nearExpiryCount++;
+        }
       }
-      if (item['quantity'] == 0 || item['quantity'] == '0') outOfStockCount++;
     }
 
     return Scaffold(
@@ -146,6 +186,9 @@ class _InventoryScreenState extends State<InventoryScreen> {
                           borderRadius: BorderRadius.circular(25),
                         ),
                         child: TextField(
+                          controller: _searchController,
+                          onChanged: (value) =>
+                              setState(() => _searchQuery = value),
                           decoration: InputDecoration(
                             hintText: isCategoryView
                                 ? "วัตถุดิบทั้งหมด"
@@ -158,10 +201,21 @@ class _InventoryScreenState extends State<InventoryScreen> {
                               padding: EdgeInsets.all(14),
                               child: ListIcon(size: 20),
                             ),
-                            suffixIcon: const Icon(
-                              Icons.search,
-                              color: Colors.black,
-                            ),
+                            suffixIcon: _searchQuery.isEmpty
+                                ? const Icon(
+                                    Icons.search,
+                                    color: Colors.black,
+                                  )
+                                : IconButton(
+                                    icon: const Icon(
+                                      Icons.close,
+                                      color: Colors.black,
+                                    ),
+                                    onPressed: () {
+                                      _searchController.clear();
+                                      setState(() => _searchQuery = '');
+                                    },
+                                  ),
                             border: InputBorder.none,
                             contentPadding: const EdgeInsets.symmetric(
                               vertical: 13,
@@ -206,7 +260,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
                           color: Colors.grey,
                           thickness: 0.5,
                         ),
-                        _buildStatColumn("$outOfStockCount", "หมดแล้ว"),
+                        _buildStatColumn("$expiredCount", "หมดแล้ว"),
                       ],
                     ),
                   ),
@@ -219,6 +273,30 @@ class _InventoryScreenState extends State<InventoryScreen> {
                     ? const Center(
                         child: CircularProgressIndicator(color: Colors.blue),
                       )
+                    : isSearching
+                    // 🔍 กำลังพิมพ์ค้นหา — โชว์ผลลัพธ์ที่ตรงกับคำค้นจากของ
+                    // ทั้งหมดในคลังจริง แทนที่มุมมองหมวดหมู่/รายการปกติ
+                    ? (searchResults.isEmpty
+                          ? const Center(
+                              child: Text(
+                                "ไม่พบวัตถุดิบที่ค้นหา",
+                                style: TextStyle(
+                                  color: Colors.black54,
+                                  fontSize: 16,
+                                ),
+                              ),
+                            )
+                          : ListView(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 20,
+                              ),
+                              children: [
+                                ...searchResults.map(
+                                  (item) => _buildItemCard(context, item),
+                                ),
+                                const SizedBox(height: 30),
+                              ],
+                            ))
                     : _inventoryItems
                           .isEmpty // 🚀 เช็กตรงนี้ครับ ถ้า list ว่าง
                     ? const Center(

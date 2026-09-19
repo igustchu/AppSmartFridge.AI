@@ -10,6 +10,7 @@ import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
 import '../widgets/recipe_flow_widgets.dart';
 import 'result_screen.dart';
+import '../config/api_keys.dart';
 
 /// หน้าถ่ายรูปวัตถุดิบเพื่อสแกนเข้าตู้เย็น (ตามดีไซน์ใน Figma: "SCAN")
 /// รายการ "วัตถุดิบที่เพิ่มล่าสุด" ดึงจาก Supabase จริงเสมอ (ไม่ใช้ตัวเลข mock ของ Figma)
@@ -22,7 +23,7 @@ class ImageScanning extends StatefulWidget {
 
 class _ImageScanningState extends State<ImageScanning> {
   final ImagePicker _picker = ImagePicker();
-  final String _apiKey = '';
+  final String _apiKey = ApiKeys.geminiImageScanning;
 
   List<Map<String, dynamic>> _recentItems = [];
   bool _isLoadingRecent = true;
@@ -59,16 +60,69 @@ class _ImageScanningState extends State<ImageScanning> {
   Future<void> _pickAndAnalyzeImage(ImageSource source) async {
     if (!mounted) return;
     try {
-      final XFile? image = await _picker.pickImage(source: source);
+      // จำกัดขนาดรูปก่อนส่งเข้า Gemini — กล้องมือถือสมัยนี้ถ่ายได้ไฟล์ใหญ่มาก
+      // (10+ MB) ถ้าส่งเต็มขนาดจริงจะอัพโหลดช้าและโมเดลประมวลผลช้าตามไปด้วย
+      // โดยไม่ได้ช่วยให้แม่นยำขึ้นเลย (โมเดล vision ย่อภาพลงประมวลผลอยู่แล้ว)
+      // ย่อเหลือด้านยาวสุดไม่เกิน 1024px และลดคุณภาพลงเล็กน้อยช่วยให้เร็วขึ้น
+      // มากโดยไม่กระทบความแม่นยำในการจำแนกวัตถุดิบ
+      final XFile? image = await _picker.pickImage(
+        source: source,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        imageQuality: 80,
+      );
       if (image == null) return;
 
       if (!mounted) return;
       showDialog(
         context: context,
         barrierDismissible: false,
-        builder: (ctx) => const PopScope(
+        // จำกัดสเกลข้อความไว้ไม่ให้เกิน 1.3 เท่า เพราะถ้าเครื่องตั้งค่า
+        // ขนาดตัวอักษรใหญ่พิเศษ (Accessibility > Larger Text) ไว้สูงมาก
+        // ป้ายข้อความเล็กๆ ในไดอะล็อกนี้จะขยายจนล้นทับเนื้อหาข้างหลังได้
+        // (การ์ดสีขาวช่วยให้ดูเป็นกล่องไดอะล็อกจริงๆ ไม่ใช่ตัวหนังสือลอย
+        // ทับพื้นหลังตรงๆ ด้วย)
+        builder: (ctx) => PopScope(
           canPop: false,
-          child: Center(child: CircularProgressIndicator(color: Colors.blue)),
+          child: MediaQuery.withClampedTextScaling(
+            maxScaleFactor: 1.3,
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 28,
+                  vertical: 24,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Colors.black26,
+                      blurRadius: 10,
+                      offset: Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: const Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(color: Colors.blue),
+                    SizedBox(height: 16),
+                    Text(
+                      "กำลังวิเคราะห์วัตถุดิบ...",
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.black87,
+                        fontWeight: FontWeight.w600,
+                        decoration: TextDecoration.none,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
         ),
       );
 

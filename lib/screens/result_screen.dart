@@ -22,6 +22,27 @@ class ResultScreen extends StatefulWidget {
 
 class _ResultScreenState extends State<ResultScreen> {
   @override
+  void initState() {
+    super.initState();
+
+    // จัดกลุ่มวัตถุดิบที่สแกนเจอให้หมวดหมู่เดียวกันอยู่ติดกัน จะได้ไล่ดูง่าย
+    // ใช้ index เดิมเป็นตัวตัดสินลำดับรองเพื่อให้เรียงแบบ stable (ของในหมวด
+    // เดียวกันยังอยู่ตามลำดับที่สแกนเจอ ไม่สลับกันไปมา)
+    final indexed = widget.foundItems.asMap().entries.toList();
+    indexed.sort((a, b) {
+      final catA = (a.value is Map ? a.value['category']?.toString() : null) ?? "อื่นๆ";
+      final catB = (b.value is Map ? b.value['category']?.toString() : null) ?? "อื่นๆ";
+      final catCompare = catA.compareTo(catB);
+      if (catCompare != 0) return catCompare;
+      return a.key.compareTo(b.key);
+    });
+
+    widget.foundItems
+      ..clear()
+      ..addAll(indexed.map((e) => e.value));
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFD8EEFF),
@@ -267,8 +288,14 @@ class _ResultScreenState extends State<ResultScreen> {
             .maybeSingle();
 
         if (existingItem != null) {
-          int newQuantity =
-              (existingItem['quantity'] ?? 0) + (item['quantity'] as int);
+          // ใช้ num แทน int ตรงๆ เพราะตอนนี้คอลัมน์ quantity รองรับเศษส่วนได้
+          // แล้ว (เช่นเหลือ 0.5 จากการทำอาหาร) ถ้า cast เป็น int ตรงๆ จะพังทันที
+          // ตอนของที่มีอยู่เดิมเหลือเป็นเศษส่วนพอดี
+          final existingQty = existingItem['quantity'];
+          num existingQtyNum = existingQty is num
+              ? existingQty
+              : num.tryParse(existingQty?.toString() ?? '') ?? 0;
+          num newQuantity = existingQtyNum + (item['quantity'] as int);
 
           await supabase
               .from('fridge_items')

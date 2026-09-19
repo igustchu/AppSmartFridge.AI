@@ -84,11 +84,17 @@ class _SavedRecipesScreenState extends State<SavedRecipesScreen> {
     int have = 0;
     for (final item in needed) {
       final ing = Map<String, dynamic>.from(item);
-      final neededName = (ing['name'] ?? '').toString();
+      final neededName = (ing['name'] ?? '').toString().trim().toLowerCase();
       final neededQty = _toNum(ing['use_quantity']);
-      final match = _inventory
-          .where((inv) => (inv['name'] ?? '').toString() == neededName)
-          .toList();
+      // เทียบชื่อแบบยืดหยุ่นเหมือนตอนหักวัตถุดิบจริงใน RecipeDetailScreen
+      // เพื่อให้ตัวเลข "มีของครบกี่ชนิด" ตรงกับที่กดทำอาหารจริงจะเจอ
+      final match = _inventory.where((inv) {
+        final invName = (inv['name'] ?? '').toString().trim().toLowerCase();
+        return invName.isNotEmpty &&
+            (invName == neededName ||
+                invName.contains(neededName) ||
+                neededName.contains(invName));
+      }).toList();
       if (match.isNotEmpty && _toNum(match.first['quantity']) >= neededQty) {
         have++;
       }
@@ -155,7 +161,7 @@ class _SavedRecipesScreenState extends State<SavedRecipesScreen> {
       backgroundColor: const Color(0xFFD8EEFF),
       bottomNavigationBar: const AppBottomNav(current: AppTab.scan),
       floatingActionButton: FloatingActionButton(
-        backgroundColor: const Color(0xffffd84d),
+        backgroundColor: const Color(0xFFFFF7D0),
         onPressed: () async {
           await Navigator.push(
             context,

@@ -10,6 +10,7 @@ import '../widgets/app_icons.dart';
 import '../widgets/recipe_flow_widgets.dart';
 import 'scan_recipe_result_screen.dart';
 import 'saved_recipes_screen.dart';
+import '../config/api_keys.dart';
 
 /// ทางลัด "สแกนสูตรอาหาร" จากเมนูหลัก (เมนูตะแกรงหน้าแรก)
 /// ผู้ใช้ขอให้เข้ามาแล้วเจอหน้าคลังสูตรอาหารที่บันทึกไว้แล้วเลย แทนที่จะพา
@@ -36,7 +37,7 @@ class ScanRecipeCaptureScreen extends StatefulWidget {
 
 class _ScanRecipeCaptureScreenState extends State<ScanRecipeCaptureScreen> {
   final ImagePicker _picker = ImagePicker();
-  final String _apiKey = '';
+  final String _apiKey = ApiKeys.gemini;
 
   List<Map<String, dynamic>> _recentRecipes = [];
   bool _isLoadingRecent = true;

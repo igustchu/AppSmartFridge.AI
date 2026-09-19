@@ -31,9 +31,27 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
   bool _isCooking = false;
   bool _isDeleting = false;
 
+  // แปลงค่าจำนวนให้เป็นตัวเลขแบบทนทาน เผื่อ AI ตอบ use_quantity มาเป็น
+  // ข้อความปนหน่วย (เช่น "1 ลูก") หรือเป็นเศษส่วน (เช่น "1/2") แทนที่จะเป็น
+  // ตัวเลขล้วนๆ ตามที่ขอไว้ในพรอมป์เป๊ะๆ เสมอไป ถ้าแปลงตรงๆ ไม่ได้เลยจะได้
+  // ลองดึงแค่ตัวเลขนำหน้าออกมาก่อน แทนที่จะปัดเป็น 0 แล้วข้ามการหักไปเฉยๆ
   num _toNum(dynamic v) {
     if (v is num) return v;
-    return num.tryParse(v?.toString() ?? '') ?? 0;
+    final text = v?.toString().trim() ?? '';
+    if (text.isEmpty) return 0;
+
+    final direct = num.tryParse(text);
+    if (direct != null) return direct;
+
+    final fraction = RegExp(r'(\d+(\.\d+)?)\s*/\s*(\d+(\.\d+)?)').firstMatch(text);
+    if (fraction != null) {
+      final numerator = double.tryParse(fraction.group(1) ?? '') ?? 0;
+      final denominator = double.tryParse(fraction.group(3) ?? '') ?? 1;
+      return denominator == 0 ? 0 : numerator / denominator;
+    }
+
+    final leadingNumber = RegExp(r'\d+(\.\d+)?').firstMatch(text);
+    return double.tryParse(leadingNumber?.group(0) ?? '') ?? 0;
   }
 
   // แสดง "ไม่ได้ระบุ" แทนที่จะปล่อยว่างเปล่า เมื่อ AI ไม่ได้ระบุปริมาณ/หน่วยของ
@@ -50,11 +68,15 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
 
   // เช็คว่าวัตถุดิบที่สูตรต้องการ มีในตู้เย็นพอไหม (เทียบชื่อ + จำนวน)
   bool _isIngredientAvailable(Map<String, dynamic> needed) {
-    final neededName = (needed['name'] ?? '').toString();
+    final neededName = (needed['name'] ?? '').toString().trim().toLowerCase();
     final neededQty = _toNum(needed['use_quantity']);
-    final match = widget.inventory
-        .where((inv) => (inv['name'] ?? '').toString() == neededName)
-        .toList();
+    final match = widget.inventory.where((inv) {
+      final invName = (inv['name'] ?? '').toString().trim().toLowerCase();
+      return invName.isNotEmpty &&
+          (invName == neededName ||
+              invName.contains(neededName) ||
+              neededName.contains(invName));
+    }).toList();
     if (match.isEmpty) return false;
     final haveQty = _toNum(match.first['quantity']);
     return haveQty >= neededQty;
@@ -95,42 +117,103 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
       List<dynamic> detailedIngredients =
           widget.recipe['detailed_ingredients'] ?? [];
 
+      int deductedCount = 0;
+      List<String> notFoundNames = [];
+      // เก็บ error จริงตอนยิง update ไป Supabase แยกจากกรณี "หาไม่เจอในคลัง"
+      // เพราะสาเหตุคนละแบบกัน (เช่น ฐานข้อมูลปฏิเสธสิทธิ์แก้ไข ไม่ใช่แค่หา
+      // วัตถุดิบไม่เจอ) ผู้ใช้จะได้รู้ว่าจริงๆ แล้วเกิดอะไรขึ้นกันแน่
+      List<String> updateErrors = [];
+
       // วนลูปเช็ควัตถุดิบที่ AI บอกว่าต้องใช้
       for (var needed in detailedIngredients) {
-        String neededName = needed['name'] ?? '';
-        int neededQty = (needed['use_quantity'] is int)
-            ? needed['use_quantity']
-            : int.tryParse(needed['use_quantity'].toString()) ?? 0;
+        String neededNameRaw = (needed['name'] ?? '').toString();
+        String neededName = neededNameRaw.trim().toLowerCase();
+        num neededQty = _toNum(needed['use_quantity']);
 
-        // หาวัตถุดิบในตู้เย็นที่ชื่อตรงกัน
-        var matchedItem = widget.inventory
-            .where((inv) => inv['name'] == neededName)
-            .firstOrNull;
+        if (neededName.isEmpty) continue;
 
-        if (matchedItem != null && neededQty > 0) {
-          int currentQty = matchedItem['quantity'] ?? 0;
-          int newQty = currentQty - neededQty;
+        // หาวัตถุดิบในตู้เย็นที่ชื่อตรงกัน เทียบแบบยืดหยุ่น (ตัดช่องว่าง/ตัว
+        // พิมพ์เล็กใหญ่ และยอมให้ชื่อฝั่งหนึ่งเป็นส่วนหนึ่งของอีกฝั่ง) เพราะชื่อ
+        // ที่ AI ตอบกลับมาอาจไม่ตรงเป๊ะกับชื่อที่บันทึกไว้ในคลัง
+        var matchedItem = widget.inventory.where((inv) {
+          final invName = (inv['name'] ?? '').toString().trim().toLowerCase();
+          return invName.isNotEmpty &&
+              (invName == neededName ||
+                  invName.contains(neededName) ||
+                  neededName.contains(invName));
+        }).firstOrNull;
+
+        if (matchedItem == null) {
+          notFoundNames.add(neededNameRaw);
+          continue;
+        }
+
+        if (neededQty > 0) {
+          num currentQty = _toNum(matchedItem['quantity']);
+          // หักตามจำนวนจริงแบบมีทศนิยมได้เลย (เช่นใช้ไป 0.5 ลูก ก็เหลือ 0.5
+          // ลูกจริงๆ ไม่ปัดขึ้นทั้งลูก) คอลัมน์ quantity ใน Supabase ต้องเป็น
+          // ชนิด numeric/decimal ถึงจะรับค่าทศนิยมแบบนี้ได้ — ถ้ายังเป็น
+          // integer อยู่ ต้องรัน `alter table fridge_items alter column
+          // quantity type numeric;` ใน Supabase SQL editor ก่อน ไม่งั้นฐาน
+          // ข้อมูลจะปฏิเสธค่าทศนิยมแบบเดียวกับตอนที่เจอ error "0.7" มาก่อน
+          num newQty = currentQty - neededQty;
           if (newQty < 0) newQty = 0; // ป้องกันเลขติดลบ
 
-          // อัปเดตยอดใน Database
-          await supabase
-              .from('fridge_items')
-              .update({'quantity': newQty})
-              .eq('item_id', matchedItem['item_id']);
+          // แยก try/catch เฉพาะจุดอัปเดตแต่ละชิ้น เพื่อให้วัตถุดิบชิ้นอื่นๆ ยัง
+          // หักต่อได้ปกติ ถึงแม้ชิ้นนี้จะอัปเดตไม่ผ่าน (เช่นโดนบล็อกสิทธิ์จาก
+          // ฝั่งฐานข้อมูล) แทนที่จะให้ทั้งฟังก์ชันพังแล้วไม่หักอะไรเลยสักชิ้น
+          try {
+            if (newQty <= 0) {
+              // ใช้วัตถุดิบชิ้นนี้หมดแล้ว ให้ลบออกจากคลังไปเลย แทนที่จะ
+              // ปล่อยให้ค้างเป็นแถวจำนวน 0 ชิ้น เพราะมันถูกใช้ไปแล้วจริงๆ
+              await supabase
+                  .from('fridge_items')
+                  .delete()
+                  .eq('item_id', matchedItem['item_id']);
+            } else {
+              await supabase
+                  .from('fridge_items')
+                  .update({'quantity': newQty})
+                  .eq('item_id', matchedItem['item_id']);
+            }
+            deductedCount++;
+          } catch (e) {
+            updateErrors.add("${matchedItem['name'] ?? neededNameRaw}: $e");
+          }
         }
       }
 
       if (mounted) {
+        final hasNotFound = notFoundNames.isNotEmpty;
+        final hasUpdateError = updateErrors.isNotEmpty;
+        String message;
+        Color bgColor;
+
+        if (hasUpdateError) {
+          // ฐานข้อมูลปฏิเสธการอัปเดตจริงๆ (เช่นสิทธิ์ไม่พอ) ต้องโชว์ error ตรงๆ
+          // ไม่งั้นจะดูเหมือนกดแล้วไม่มีอะไรเกิดขึ้นเลย ทั้งที่จริงๆ error
+          message = "หักวัตถุดิบไม่สำเร็จบางรายการ: ${updateErrors.join(' | ')}";
+          bgColor = Colors.red;
+        } else if (deductedCount == 0) {
+          // ไม่พบวัตถุดิบที่ตรงกันในคลังเลยสักชิ้น ไม่ควรบอกว่า "เรียบร้อยแล้ว"
+          message = "ไม่พบวัตถุดิบที่ตรงกับในคลังเลย จึงยังไม่ได้หักอะไรออก "
+              "(${notFoundNames.join(', ')})";
+          bgColor = Colors.orange;
+        } else if (hasNotFound) {
+          message =
+              "หักวัตถุดิบไปแล้ว $deductedCount รายการ แต่หาไม่เจอในคลัง: "
+              "${notFoundNames.join(', ')}";
+          bgColor = Colors.orange;
+        } else {
+          message = "ทำอาหารเสร็จสิ้น! หักวัตถุดิบเรียบร้อยแล้ว 🍲";
+          bgColor = Colors.green;
+        }
+
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("ทำอาหารเสร็จสิ้น! หักวัตถุดิบเรียบร้อยแล้ว 🍲"),
-            backgroundColor: Colors.green,
-          ),
+          SnackBar(content: Text(message), backgroundColor: bgColor),
         );
-        Navigator.pop(
-          context,
-          true,
-        ); // ส่งค่า true กลับไปให้หน้าเดิมรีเฟรชตู้เย็น
+        // ถ้ามีที่หักสำเร็จอย่างน้อย 1 ชิ้น ค่อยบอกหน้าเดิมให้รีเฟรชตู้เย็น
+        Navigator.pop(context, deductedCount > 0);
       }
     } catch (e) {
       if (mounted) {
@@ -454,7 +537,7 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
                       child: ElevatedButton(
                         onPressed: _isCooking ? null : _startCooking,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xffffd84d),
+                          backgroundColor: const Color(0xFFFFF7D0),
                           foregroundColor: const Color(0xff5189C9),
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(15),

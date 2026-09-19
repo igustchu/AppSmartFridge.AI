@@ -30,6 +30,11 @@ Future<void> main() async {
 
   await NotificationService.init();
 
+  // ถ้ามีเซสชันผู้ใช้ค้างอยู่แล้ว (เปิดแอปโดยไม่ต้อง login ใหม่) ให้ซิงก์
+  // แจ้งเตือนวันหมดอายุทันทีตั้งแต่แอปเปิด ไม่ต้องรอให้ไปเปิดหน้าคลังก่อน
+  // (fire-and-forget ไม่ให้บล็อกการเปิดแอป)
+  NotificationService.scheduleExpiryReminders().catchError((_) {});
+
 
 await Future.delayed(
   const Duration(seconds: 3)

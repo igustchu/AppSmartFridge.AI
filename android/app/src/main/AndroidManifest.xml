@@ -1,4 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- แจ้งเตือนวันหมดอายุวัตถุดิบ (NotificationService) — Android 13 (API 33)
+         ขึ้นไปต้องประกาศสิทธิ์นี้ถึงจะขอ runtime permission ได้ -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- ให้แจ้งเตือนที่ตั้งล่วงหน้ายังทำงานได้แม้เครื่องเข้าโหมดประหยัดพลังงาน -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <application
         android:label="test_app"
         android:name="${applicationName}"

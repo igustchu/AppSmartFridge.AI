@@ -50,9 +50,35 @@ class _CookMealScreenState extends State<CookMealScreen> {
           .eq('id', widget.mealId)
           .single();
 
+      final loadedMeal = Map<String, dynamic>.from(data);
+
+      // ตรวจสถานะวัตถุดิบจริงจากคลัง (fridge_items) ทุกครั้งที่เปิดหน้านี้
+      // แทนที่จะเชื่อค่า checked เดิมที่บันทึกไว้ตอนสร้างแผน (ซึ่งจะติ๊กถูก
+      // ไว้หมดโดยไม่ได้เทียบกับของจริงในตู้เย็นเลย) — ถ้าวัตถุดิบไม่มีในคลัง
+      // หรือมีไม่พอตามจำนวนที่สูตรต้องใช้ ต้องไม่ติ๊กให้
+      final rawIngredients = loadedMeal['ingredients'];
+      List<Map<String, dynamic>> ingredientsList = rawIngredients is List
+          ? rawIngredients.map((e) => Map<String, dynamic>.from(e)).toList()
+          : <Map<String, dynamic>>[];
+
+      if (ingredientsList.isNotEmpty) {
+        final user = supabase.auth.currentUser;
+        if (user != null) {
+          final fridgeItems = await supabase
+              .from('fridge_items')
+              .select()
+              .eq('user_id', user.id);
+          ingredientsList = _withRealAvailability(
+            ingredientsList,
+            List<Map<String, dynamic>>.from(fridgeItems),
+          );
+          loadedMeal['ingredients'] = ingredientsList;
+        }
+      }
+
       if (mounted) {
         setState(() {
-          meal = Map<String, dynamic>.from(data);
+          meal = loadedMeal;
           loading = false;
         });
       }
@@ -60,6 +86,49 @@ class _CookMealScreenState extends State<CookMealScreen> {
       debugPrint('โหลดข้อมูลมื้ออาหารไม่สำเร็จ: $e');
       if (mounted) setState(() => loading = false);
     }
+  }
+
+  // เทียบวัตถุดิบที่สูตรต้องใช้กับของจริงในคลัง (ชื่อเทียบแบบยืดหยุ่น
+  // เหมือนตอนหักสต็อกจริง) แล้วคืนรายการวัตถุดิบพร้อมค่า checked ที่ตรงกับ
+  // สถานะจริง: ติ๊กถูกก็ต่อเมื่อเจอวัตถุดิบชื่อตรงกัน "และ" มีจำนวนพอใช้
+  // ตามที่สูตรต้องการ ถ้าไม่มีในคลังเลยหรือมีไม่พอ จะไม่ติ๊กให้
+  List<Map<String, dynamic>> _withRealAvailability(
+    List<Map<String, dynamic>> ingredients,
+    List<Map<String, dynamic>> fridgeItems,
+  ) {
+    return ingredients.map((ing) {
+      final nameRaw = ing['name']?.toString() ?? '';
+      final name = nameRaw.trim().toLowerCase();
+      final needAmount =
+          _parseQuantityAmount(ing['quantity']?.toString() ?? '');
+
+      if (name.isEmpty) {
+        return {...ing, 'checked': false};
+      }
+
+      final matches = fridgeItems.where((item) {
+        final itemName =
+            (item['name']?.toString() ?? '').trim().toLowerCase();
+        return itemName.isNotEmpty &&
+            (itemName == name ||
+                itemName.contains(name) ||
+                name.contains(itemName));
+      }).toList();
+
+      bool isAvailable;
+      if (matches.isEmpty) {
+        isAvailable = false;
+      } else {
+        final haveQty = matches.fold<num>(0, (sum, item) {
+          final q = item['quantity'];
+          final qNum = q is num ? q : (num.tryParse(q?.toString() ?? '') ?? 0);
+          return sum + qNum;
+        });
+        isAvailable = haveQty > 0 && (needAmount <= 0 || haveQty >= needAmount);
+      }
+
+      return {...ing, 'checked': isAvailable};
+    }).toList();
   }
 
   List<Map<String, dynamic>> get _ingredients {
@@ -281,17 +350,28 @@ class _CookMealScreenState extends State<CookMealScreen> {
 
   // หักวัตถุดิบที่ใช้ในมื้อนี้ออกจาก fridge_items จริง (เทียบชื่อแบบยืดหยุ่น
   // เหมือนตอนสร้างแผน) กดทำแล้วแล้วของในตู้เย็นต้องลดลงจริง ไม่ใช่แค่ติ๊กในแอป
-  Future<void> _deductFridgeIngredients() async {
+  // คืนผลจริงว่าหักไปกี่ชิ้น / หาไม่เจอชื่ออะไรบ้าง / อัปเดตไม่ผ่านเพราะอะไร
+  // เพื่อให้ _markAsCooked() โชว์ผลลัพธ์ตรงกับที่เกิดขึ้นจริง แทนที่จะขึ้นว่า
+  // "หักวัตถุดิบเรียบร้อยแล้ว" ทั้งที่จริงๆ อาจไม่ได้หักอะไรออกไปเลยสักชิ้น
+  Future<({int deducted, List<String> notFound, List<String> errors})>
+      _deductFridgeIngredients() async {
     final user = supabase.auth.currentUser;
-    if (user == null) return;
+    if (user == null) {
+      return (deducted: 0, notFound: <String>[], errors: <String>[]);
+    }
 
     final fridgeItems = await supabase
         .from('fridge_items')
         .select()
         .eq('user_id', user.id);
 
+    int deducted = 0;
+    List<String> notFound = [];
+    List<String> errors = [];
+
     for (final ing in _ingredients) {
-      final name = (ing['name']?.toString() ?? '').trim().toLowerCase();
+      final nameRaw = ing['name']?.toString() ?? '';
+      final name = nameRaw.trim().toLowerCase();
       if (name.isEmpty) continue;
 
       final useAmount = _parseQuantityAmount(ing['quantity']?.toString() ?? '');
@@ -305,41 +385,80 @@ class _CookMealScreenState extends State<CookMealScreen> {
                 name.contains(itemName));
       }).toList();
 
-      if (matches.isEmpty) continue;
+      if (matches.isEmpty) {
+        notFound.add(nameRaw);
+        continue;
+      }
       final matched = matches.first;
 
       final currentQty =
           num.tryParse(matched['quantity']?.toString() ?? '') ?? 0;
-      // ปัดขึ้นอย่างน้อย 1 หน่วย กันกรณีปริมาณเป็นเศษส่วน (เช่น 1/2 หัว) แล้ว
-      // ปัดลงจนไม่หักอะไรเลย
-      final deductAmount = useAmount.ceil();
-      final newQty = (currentQty - deductAmount) < 0
-          ? 0
-          : (currentQty - deductAmount).round();
+      // หักตามจำนวนจริงแบบมีทศนิยมได้เลย (เช่น 1/2 หัว ก็หัก 0.5 จริงๆ ไม่ปัด
+      // ขึ้นเป็น 1 หัวเต็ม) คอลัมน์ quantity ใน Supabase ต้องเป็นชนิด
+      // numeric/decimal ถึงจะรับค่าทศนิยมได้ (ดูหมายเหตุเดียวกันใน
+      // recipe_detail_screen.dart)
+      final newQty = (currentQty - useAmount) < 0 ? 0 : (currentQty - useAmount);
 
-      await supabase
-          .from('fridge_items')
-          .update({'quantity': newQty})
-          .eq('item_id', matched['item_id']);
+      // แยก try/catch เฉพาะจุดอัปเดต ถ้าชิ้นนี้อัปเดตไม่ผ่าน (เช่นโดนบล็อก
+      // สิทธิ์จากฐานข้อมูล) วัตถุดิบชิ้นอื่นยังหักต่อได้ตามปกติ
+      try {
+        if (newQty <= 0) {
+          // ใช้วัตถุดิบชิ้นนี้หมดแล้ว ให้ลบออกจากคลังไปเลย แทนที่จะปล่อยให้
+          // ค้างเป็นแถวจำนวน 0 ชิ้น เพราะมันถูกใช้ไปแล้วจริงๆ
+          await supabase
+              .from('fridge_items')
+              .delete()
+              .eq('item_id', matched['item_id']);
+        } else {
+          await supabase
+              .from('fridge_items')
+              .update({'quantity': newQty})
+              .eq('item_id', matched['item_id']);
+        }
+        deducted++;
+      } catch (e) {
+        errors.add("${matched['name'] ?? nameRaw}: $e");
+      }
     }
+
+    return (deducted: deducted, notFound: notFound, errors: errors);
   }
 
   Future<void> _markAsCooked() async {
     setState(() => saving = true);
 
     try {
-      await _deductFridgeIngredients();
+      final result = await _deductFridgeIngredients();
 
       await supabase
           .from('weekly_meals')
           .update({'is_cooked': true}).eq('id', widget.mealId);
 
       if (!mounted) return;
+
+      // โชว์ผลลัพธ์ตรงกับที่เกิดขึ้นจริงกับตู้เย็น ไม่ใช่ข้อความสำเร็จตายตัว
+      String message;
+      Color bgColor;
+      if (result.errors.isNotEmpty) {
+        message = "หักวัตถุดิบไม่สำเร็จบางรายการ: ${result.errors.join(' | ')}";
+        bgColor = Colors.red;
+      } else if (result.deducted == 0) {
+        message = result.notFound.isEmpty
+            ? "บันทึกว่าทำแล้ว แต่ไม่มีวัตถุดิบให้หัก"
+            : "บันทึกว่าทำแล้ว แต่หาวัตถุดิบในคลังไม่เจอ: "
+                "${result.notFound.join(', ')}";
+        bgColor = Colors.orange;
+      } else if (result.notFound.isNotEmpty) {
+        message = "หักวัตถุดิบไปแล้ว ${result.deducted} รายการ "
+            "แต่หาไม่เจอในคลัง: ${result.notFound.join(', ')}";
+        bgColor = Colors.orange;
+      } else {
+        message = "ทำอาหารเสร็จสิ้น! หักวัตถุดิบเรียบร้อยแล้ว 🍲";
+        bgColor = Colors.green;
+      }
+
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("ทำอาหารเสร็จสิ้น! หักวัตถุดิบเรียบร้อยแล้ว 🍲"),
-          backgroundColor: Colors.green,
-        ),
+        SnackBar(content: Text(message), backgroundColor: bgColor),
       );
       Navigator.pop(context, true);
     } catch (e) {
@@ -422,7 +541,14 @@ class _CookMealScreenState extends State<CookMealScreen> {
                   ),
                   const SizedBox(height: 20),
                   Expanded(
-                    child: ListView(
+                    // ให้ดึงลงเพื่อรีเฟรชได้ทุกเมื่อ เผื่อของในคลังถูกแก้ไข
+                    // จากหน้าจออื่นระหว่างที่ค้างอยู่หน้านี้ (เช่น หักสต็อก
+                    // จากเมนูอื่น หรือเพิ่ม/ลบวัตถุดิบในคลัง) จะได้เห็นสถานะ
+                    // "สถานะวัตถุดิบ" ที่ตรงกับของจริงเสมอ ไม่ใช่แค่ตอนเปิด
+                    // หน้าครั้งแรกเท่านั้น
+                    child: RefreshIndicator(
+                      onRefresh: _loadMeal,
+                      child: ListView(
                       padding: const EdgeInsets.symmetric(horizontal: 20),
                       children: [
                         // ชื่อเมนู — กล่องขาวตรงกลาง ตามดีไซน์เดียวกับหน้า
@@ -628,6 +754,7 @@ class _CookMealScreenState extends State<CookMealScreen> {
                         const SizedBox(height: 100),
                       ],
                     ),
+                    ),
                   ),
                 ],
               ),
@@ -666,7 +793,7 @@ class _CookMealScreenState extends State<CookMealScreen> {
                       height: 48,
                       child: ElevatedButton.icon(
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xffffd84d),
+                          backgroundColor: const Color(0xFFFFF7D0),
                           foregroundColor: Colors.black87,
                           elevation: 0,
                           shape: RoundedRectangleBorder(

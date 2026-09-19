@@ -5,6 +5,7 @@ import 'package:google_generative_ai/google_generative_ai.dart';
 import 'recipe_detail_screen.dart'; // ✅ นำเข้าหน้าใหม่
 import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
+import '../config/api_keys.dart';
 
 class AiRecipeScreen extends StatefulWidget {
   const AiRecipeScreen({super.key});
@@ -33,6 +34,22 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
     '< 1 ชั่วโมง',
   ];
 
+  // แปลงตัวเลือกเวลาที่เลือกไว้ให้เป็นข้อความบอก Gemini แบบชัดเจนเป็นตัวเลข
+  // นาทีตรงๆ (ไม่ใช่ส่งข้อความดิบอย่าง "< 30 นาที" ไปตรงๆ) เพื่อให้โมเดล
+  // เข้าใจเงื่อนไขแม่นยำขึ้นและเมนูที่ได้ใช้เวลาทำสอดคล้องกับที่ผู้ใช้เลือกจริง
+  String _timeConstraintForPrompt() {
+    switch (_selectedTime) {
+      case '< 15 นาที':
+        return 'ต้องทำเสร็จภายใน 15 นาที';
+      case '< 30 นาที':
+        return 'ต้องทำเสร็จภายใน 30 นาที';
+      case '< 1 ชั่วโมง':
+        return 'ต้องทำเสร็จภายใน 60 นาที';
+      default:
+        return 'เท่าไหร่ก็ได้';
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -50,6 +67,15 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
       final now = DateTime.now();
 
       for (var item in data) {
+        // ถ้าใช้วัตถุดิบชิ้นนี้หมดแล้ว (เช่น กดทำอาหารจนหักจำนวนเหลือ 0) ก็ไม่
+        // ควรโผล่ในลิสต์ "ใกล้หมดอายุ" อีกต่อไป เพราะไม่มีของเหลือให้ต้องรีบ
+        // ใช้แล้ว (ของที่ไม่มีระบุจำนวนไว้ ให้ถือว่ายังมีของอยู่ตามเดิม)
+        final qty = item['quantity'];
+        if (qty != null) {
+          final qtyNum = qty is num ? qty : num.tryParse(qty.toString());
+          if (qtyNum != null && qtyNum <= 0) continue;
+        }
+
         if (item['expiry_date'] != null) {
           final expiry = DateTime.parse(item['expiry_date']);
           final diff = expiry.difference(now).inDays;
@@ -97,11 +123,18 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
 
     try {
       // ⚠️ ใส่ API Key ของคุณที่นี่
-      final String apiKey = '';
+      final String apiKey = ApiKeys.gemini;
       final model = GenerativeModel(model: 'gemini-3.6-flash', apiKey: apiKey);
 
-      // เตรียมรายชื่อวัตถุดิบเป็น Text
+      // เตรียมรายชื่อวัตถุดิบเป็น Text (ไม่เอาของที่หมดแล้ว/เหลือ 0 ชิ้น มา
+      // เสนอให้ AI ใช้ เพราะจริงๆ ไม่มีของเหลือให้ทำอาหารแล้ว)
       String allItems = _inventory
+          .where((e) {
+            final qty = e['quantity'];
+            if (qty == null) return true;
+            final qtyNum = qty is num ? qty : num.tryParse(qty.toString());
+            return qtyNum == null || qtyNum > 0;
+          })
           .map((e) => "${e['name']} (${e['quantity']} ${e['unit']})")
           .join(", ");
       String expiringItems = _expiringSoon.map((e) => e['name']).join(", ");
@@ -113,7 +146,7 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
 
         เงื่อนไขเพิ่มเติม:
         - ประเภทอาหาร: ${_selectedCategory == 'ทั้งหมด' ? 'อะไรก็ได้' : _selectedCategory}
-        - เวลาทำไม่เกิน: ${_selectedTime == 'ไม่จำกัด' ? 'เท่าไหร่ก็ได้' : _selectedTime}
+        - เวลาทำ: ${_timeConstraintForPrompt()}
 
         ตอบกลับมาเป็น JSON Array เท่านั้น ตามรูปแบบนี้เป๊ะๆ:
         [
@@ -134,11 +167,9 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
         ห้ามใส่ Markdown ```json
       """);
 
-      final response = await model
-          .generateContent([
-            Content.multi([prompt]),
-          ])
-          .timeout(const Duration(seconds: 60));
+      final response = await _generateContentWithRetry(model, [
+        Content.multi([prompt]),
+      ]);
 
       if (response.text != null) {
         String cleanJson = response.text!
@@ -156,15 +187,55 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
         });
       }
     } catch (e) {
+      final message = e.toString();
+      final isOverloaded = message.contains('503') ||
+          message.contains('UNAVAILABLE') ||
+          message.contains('high demand');
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('สร้างเมนูไม่สำเร็จ: $e'),
+          content: Text(
+            isOverloaded
+                ? 'ตอนนี้ AI มีคนใช้งานเยอะ ลองใหม่อีกครั้งอีกสักครู่นะครับ'
+                : 'สร้างเมนูไม่สำเร็จ: $e',
+          ),
           backgroundColor: Colors.red,
         ),
       );
     } finally {
       setState(() => _isGenerating = false);
     }
+  }
+
+  // ลอง generateContent ซ้ำเองถ้าเจอ error ฝั่งเซิร์ฟเวอร์ของ Gemini ที่เกิดจาก
+  // โมเดลมีคนใช้งานพร้อมกันเยอะชั่วคราว (503 / UNAVAILABLE / high demand)
+  // เพราะ error แบบนี้ไม่ใช่บั๊กของเรา แค่ต้องรอแป๊บนึงแล้วยิงคำขอใหม่ก็มัก
+  // จะผ่าน จึงลองใหม่ให้อัตโนมัติก่อนที่จะโชว์ error ให้ผู้ใช้เห็นจริงๆ
+  Future<GenerateContentResponse> _generateContentWithRetry(
+    GenerativeModel model,
+    List<Content> content, {
+    int maxAttempts = 3,
+  }) async {
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await model
+            .generateContent(content)
+            .timeout(const Duration(seconds: 60));
+      } catch (e) {
+        final message = e.toString();
+        final isOverloaded = message.contains('503') ||
+            message.contains('UNAVAILABLE') ||
+            message.contains('high demand');
+
+        if (!isOverloaded || attempt == maxAttempts) rethrow;
+
+        // รอนานขึ้นเรื่อยๆ ก่อนลองใหม่ (2 วินาที แล้ว 4 วินาที)
+        await Future.delayed(Duration(seconds: 2 * attempt));
+      }
+    }
+
+    // ไม่ควรมาถึงบรรทัดนี้ได้ (ลูปด้านบน return หรือ rethrow เสมอ)
+    throw Exception('สร้างเมนูไม่สำเร็จ');
   }
 
   @override
@@ -322,6 +393,14 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
                     ),
                   ),
 
+                // ช่องว่างก่อนการ์ด "ประเภทอาหาร" — เดิมไม่มีช่องว่างตรงนี้เลย
+                // ทำให้ระยะห่างระหว่างการ์ดแต่ละใบไม่เท่ากัน (การ์ดวัตถุดิบใกล้
+                // หมดอายุติดกับการ์ดประเภทอาหารพอดี ในขณะที่การ์ดประเภทอาหารกับ
+                // การ์ดเวลาห่างกัน 15) เพิ่มให้เท่ากับช่องว่างระหว่างการ์ดอื่นๆ
+                // เพื่อให้จังหวะแนวตั้ง (Y) สม่ำเสมอตลอดทั้งหน้า
+                if (_expiringSoon.isNotEmpty)
+                  const SliverToBoxAdapter(child: SizedBox(height: 15)),
+
                 // 3. ตัวกรอง (Filter)
                 SliverToBoxAdapter(
                   child: Padding(
@@ -329,38 +408,82 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        _buildSectionLabel("ประเภทอาหาร"),
-                        const SizedBox(height: 8),
-                        SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Row(
-                            children: _categories
-                                .map(
-                                  (e) => _buildFilterChip(
-                                    e,
-                                    _selectedCategory,
-                                    (v) =>
-                                        setState(() => _selectedCategory = v),
-                                  ),
-                                )
-                                .toList(),
+                        // การ์ดหุ้ม "ประเภทอาหาร" ทั้งชุด (ป้ายหัวข้อ + แถวปุ่มเลือก)
+                        // ตามดีไซน์ Figma แทนที่จะปล่อยลอยอยู่บนพื้นหลังตรงๆ
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: const [
+                              BoxShadow(
+                                color: Colors.black12,
+                                blurRadius: 5,
+                                offset: Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _buildSectionLabel("ประเภทอาหาร"),
+                              const SizedBox(height: 8),
+                              SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: Row(
+                                  children: _categories
+                                      .map(
+                                        (e) => _buildFilterChip(
+                                          e,
+                                          _selectedCategory,
+                                          (v) => setState(
+                                              () => _selectedCategory = v),
+                                        ),
+                                      )
+                                      .toList(),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                         const SizedBox(height: 15),
-                        _buildSectionLabel("เวลาในการทำ"),
-                        const SizedBox(height: 8),
-                        SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Row(
-                            children: _times
-                                .map(
-                                  (e) => _buildFilterChip(
-                                    e,
-                                    _selectedTime,
-                                    (v) => setState(() => _selectedTime = v),
-                                  ),
-                                )
-                                .toList(),
+                        // การ์ดหุ้ม "เวลาในการทำ" ทั้งชุด เหมือนกัน
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            boxShadow: const [
+                              BoxShadow(
+                                color: Colors.black12,
+                                blurRadius: 5,
+                                offset: Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _buildSectionLabel("เวลาในการทำ"),
+                              const SizedBox(height: 8),
+                              SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: Row(
+                                  children: _times
+                                      .map(
+                                        (e) => _buildFilterChip(
+                                          e,
+                                          _selectedTime,
+                                          (v) => setState(
+                                              () => _selectedTime = v),
+                                        ),
+                                      )
+                                      .toList(),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                         const SizedBox(height: 20),
@@ -372,7 +495,7 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
                           child: ElevatedButton(
                             onPressed: _isGenerating ? null : _generateRecipes,
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xffffd84d),
+                              backgroundColor: const Color(0xFFFFF7D0),
                               foregroundColor: Colors.black87,
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(15),

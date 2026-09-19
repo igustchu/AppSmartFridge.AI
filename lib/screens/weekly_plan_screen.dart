@@ -172,7 +172,7 @@ class _WeeklyPlanScreenState extends State<WeeklyPlanScreen> {
                         height: 48,
                         child: ElevatedButton.icon(
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xffffd84d),
+                            backgroundColor: const Color(0xFFFFF7D0),
                             foregroundColor: Colors.black87,
                             elevation: 0,
                             shape: RoundedRectangleBorder(
@@ -334,7 +334,7 @@ class _WeeklyPlanScreenState extends State<WeeklyPlanScreen> {
     return Align(
       alignment: Alignment.centerLeft,
       child: Material(
-        color: isCooked ? Colors.white : const Color(0xffffd84d),
+        color: isCooked ? Colors.white : const Color(0xFFFFF7D0),
         borderRadius: BorderRadius.circular(15),
         child: InkWell(
           borderRadius: BorderRadius.circular(15),
