@@ -10,7 +10,6 @@ import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
 import '../widgets/recipe_flow_widgets.dart';
 import 'result_screen.dart';
-import '../config/api_keys.dart';
 
 /// หน้าถ่ายรูปวัตถุดิบเพื่อสแกนเข้าตู้เย็น (ตามดีไซน์ใน Figma: "SCAN")
 /// รายการ "วัตถุดิบที่เพิ่มล่าสุด" ดึงจาก Supabase จริงเสมอ (ไม่ใช้ตัวเลข mock ของ Figma)
@@ -23,7 +22,7 @@ class ImageScanning extends StatefulWidget {
 
 class _ImageScanningState extends State<ImageScanning> {
   final ImagePicker _picker = ImagePicker();
-  final String _apiKey = ApiKeys.geminiImageScanning;
+  final String _apiKey = '';
 
   List<Map<String, dynamic>> _recentItems = [];
   bool _isLoadingRecent = true;

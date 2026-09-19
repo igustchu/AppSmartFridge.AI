@@ -43,6 +43,5 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
-lib/config/api_keys.dart
 explained/
 *.bak

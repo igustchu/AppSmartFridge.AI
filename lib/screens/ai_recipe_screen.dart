@@ -5,7 +5,6 @@ import 'package:google_generative_ai/google_generative_ai.dart';
 import 'recipe_detail_screen.dart'; // ✅ นำเข้าหน้าใหม่
 import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
-import '../config/api_keys.dart';
 
 class AiRecipeScreen extends StatefulWidget {
   const AiRecipeScreen({super.key});
@@ -123,7 +122,7 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
 
     try {
       // ⚠️ ใส่ API Key ของคุณที่นี่
-      final String apiKey = ApiKeys.gemini;
+      final String apiKey = '';
       final model = GenerativeModel(model: 'gemini-3.6-flash', apiKey: apiKey);
 
       // เตรียมรายชื่อวัตถุดิบเป็น Text (ไม่เอาของที่หมดแล้ว/เหลือ 0 ชิ้น มา

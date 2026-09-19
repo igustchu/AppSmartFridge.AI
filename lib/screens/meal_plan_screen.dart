@@ -8,7 +8,6 @@ import '../widgets/app_icons.dart';
 
 import 'package:google_generative_ai/google_generative_ai.dart';
 import 'dart:convert';
-import '../config/api_keys.dart';
 
 
 
@@ -37,7 +36,7 @@ class _MealPlanScreenState
 
 
  
-  final String apiKey = ApiKeys.gemini;
+  final String apiKey = '';
 
 
 
