@@ -3,6 +3,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
 import '../utils/category_icons.dart';
+import '../utils/fridge_age.dart';
+import '../utils/shelf_life.dart';
 
 class ItemDetailScreen extends StatefulWidget {
   final String itemId; // รับไอดีจากหน้าคลัง
@@ -56,7 +58,10 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
   }
 
   // --- 🚀 ฟังก์ชันอัปเดตข้อมูลขึ้น Supabase ---
-  Future<void> _updateField(String field, dynamic value) async {
+  Future<void> _updateField(String field, dynamic value) =>
+      _updateFields({field: value});
+
+  Future<void> _updateFields(Map<String, dynamic> fields) async {
     // แสดง Loading ตอนกำลังเซฟ
     showDialog(
       context: context,
@@ -67,7 +72,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
     try {
       await Supabase.instance.client
           .from('fridge_items')
-          .update({field: value})
+          .update(fields)
           .eq('item_id', widget.itemId);
 
       if (mounted) Navigator.pop(context); // ปิด Loading
@@ -195,19 +200,20 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
     );
   }
 
-  // --- 🚀 Popup สำหรับเลือกปฏิทินวันหมดอายุ ---
+  // --- 🚀 Popup สำหรับเลือกปฏิทินวันหมดอายุ (ระบบคำนวณให้อัตโนมัติจากตาราง
+  // อายุการเก็บรักษา แต่ผู้ใช้ปรับแก้ให้ตรงกับความเป็นจริงได้) ---
   Future<void> _selectExpiryDate() async {
     DateTime initialDate = DateTime.now();
     if (_item!['expiry_date'] != null) {
-      initialDate = DateTime.parse(_item!['expiry_date'].toString());
+      initialDate = DateTime.parse(_item!['expiry_date'].toString()).toLocal();
     }
+    final firstDate = DateTime.now().subtract(const Duration(days: 365));
+    if (initialDate.isBefore(firstDate)) initialDate = firstDate;
 
     final DateTime? picked = await showDatePicker(
       context: context,
       initialDate: initialDate,
-      firstDate: DateTime.now().subtract(
-        const Duration(days: 365),
-      ), // ย้อนหลังได้ 1 ปี
+      firstDate: firstDate, // ย้อนหลังได้ 1 ปี
       lastDate: DateTime.now().add(
         const Duration(days: 3650),
       ), // ไปข้างหน้าได้ 10 ปี
@@ -230,11 +236,125 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
     }
   }
 
+  // --- 🚀 Popup สำหรับย้ายช่องที่เก็บ (ช่องปกติ/ช่องแช่แข็ง) — คำนวณวัน
+  // หมดอายุใหม่จากวันที่เข้าตู้เย็น + จำนวนวันที่เก็บได้ของช่องใหม่ ---
+  Future<void> _showStoragePickerDialog() async {
+    final current = _item!['storage']?.toString() ?? storageFridge;
+    final fridgeDays = _item!['fridge_days'];
+    final freezerDays = _item!['freezer_days'];
+    final hasShelfData = fridgeDays != null;
+
+    return showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text(
+          'เก็บไว้ช่องไหน',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final st in [
+                storageFridge,
+                // ไม่มีข้อมูลช่องแช่แข็ง (เช่น ผัก นม) ก็ไม่ต้องมีตัวเลือกนี้
+                if (!hasShelfData || freezerDays != null) storageFreezer,
+              ])
+                RadioListTile<String>(
+                  value: st,
+                  groupValue: current,
+                  activeColor: Colors.orange,
+                  title: Text("${storageEmoji(st)} ${storageLabel(st)}"),
+                  subtitle: !hasShelfData
+                      ? null
+                      : Text(
+                          st == storageFreezer && freezerDays == null
+                              ? "ไม่ควรเก็บในช่องแช่แข็ง"
+                              : "เก็บได้ ${formatShelfDays(int.parse((st == storageFreezer ? freezerDays : fridgeDays).toString()))}",
+                        ),
+                  onChanged:
+                      (hasShelfData && st == storageFreezer && freezerDays == null)
+                      ? null
+                      : (val) {
+                          Navigator.pop(context);
+                          if (val != null && val != current) {
+                            _changeStorage(val);
+                          }
+                        },
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('ยกเลิก', style: TextStyle(color: Colors.grey)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _changeStorage(String storage) {
+    final fields = <String, dynamic>{'storage': storage};
+    final raw = storage == storageFreezer
+        ? _item!['freezer_days']
+        : _item!['fridge_days'];
+    final days = raw == null ? null : num.tryParse(raw.toString())?.round();
+    if (days != null && _item!['created_at'] != null) {
+      final added = DateTime.parse(_item!['created_at'].toString()).toLocal();
+      fields['expiry_date'] = added
+          .add(Duration(days: days))
+          .toIso8601String();
+    }
+    _updateFields(fields);
+  }
+
+  // --- 🚀 Popup สำหรับเลือกวันที่เอาเข้าตู้เย็น (ใช้แก้กรณีเพิ่มเข้าแอปช้ากว่า
+  // วันที่เอาของเข้าตู้เย็นจริง) ---
+  Future<void> _selectAddedDate() async {
+    final now = DateTime.now();
+    DateTime initialDate = now;
+    if (_item!['created_at'] != null) {
+      initialDate = DateTime.parse(_item!['created_at'].toString()).toLocal();
+    }
+    final firstDate = now.subtract(const Duration(days: 365)); // ย้อนหลังได้ 1 ปี
+    if (initialDate.isBefore(firstDate)) initialDate = firstDate;
+    if (initialDate.isAfter(now)) initialDate = now;
+
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: initialDate,
+      firstDate: firstDate,
+      lastDate: now, // วันที่เข้าตู้เย็นเป็นวันในอนาคตไม่ได้
+      builder: (context, child) {
+        return Theme(
+          data: Theme.of(context).copyWith(
+            colorScheme: const ColorScheme.light(
+              primary: Colors.orange,
+              onPrimary: Colors.white,
+              onSurface: Colors.black,
+            ),
+          ),
+          child: child!,
+        );
+      },
+    );
+
+    if (picked != null) {
+      // เก็บเป็นเที่ยงวันตามเวลาเครื่องแล้วแปลงเป็น UTC ให้วันที่ไม่เลื่อนไป
+      // วันอื่นตอนแปลงโซนเวลากลับมาแสดงผล
+      final addedAt = DateTime(picked.year, picked.month, picked.day, 12);
+      _updateField('created_at', addedAt.toUtc().toIso8601String());
+    }
+  }
+
   // ฟังก์ชันแปลงวันที่
   String _formatThaiDate(String? isoString) {
     if (isoString == null || isoString.isEmpty) return 'ไม่ระบุ';
     try {
-      DateTime dt = DateTime.parse(isoString);
+      DateTime dt = DateTime.parse(isoString).toLocal();
       List<String> fullMonths = [
         'มกราคม',
         'กุมภาพันธ์',
@@ -350,12 +470,32 @@ Widget build(BuildContext context) {
                     ),
                     const SizedBox(height: 10),
 
-                    // 🚀 เชื่อมปุ่มปฏิทิน
+                    // 🚀 เชื่อมปุ่มปฏิทินวันหมดอายุ
+                    _buildDetailRow(
+                      icon: Icons.event_busy,
+                      text: item['expiry_date'] == null
+                          ? "หมดอายุ ไม่ระบุ"
+                          : "หมดอายุ ${_formatThaiDate(item['expiry_date']?.toString())} "
+                                "(${expiryText(daysUntilExpiry(item['expiry_date'])!)})",
+                      onEdit: _selectExpiryDate,
+                    ),
+                    const SizedBox(height: 10),
+
+                    // 🚀 ช่องที่เก็บ
+                    _buildDetailRow(
+                      icon: Icons.kitchen,
+                      text:
+                          "เก็บใน ${storageEmoji(item['storage']?.toString())} ${storageLabel(item['storage']?.toString())}"
+                          "${(item['food_state']?.toString() ?? '').isEmpty ? '' : ' · ${item['food_state']}'}",
+                      onEdit: _showStoragePickerDialog,
+                    ),
+                    const SizedBox(height: 10),
+
+                    // 🚀 เชื่อมปุ่มปฏิทิน (แก้วันที่เข้าตู้เย็น)
                     _buildDetailRow(
                       icon: Icons.calendar_month,
-                      text:
-                          "หมดอายุ ${_formatThaiDate(item['expiry_date']?.toString())}",
-                      onEdit: _selectExpiryDate,
+                      text: fridgeAgeText(item['created_at']),
+                      onEdit: _selectAddedDate,
                     ),
                     const SizedBox(height: 10),
 
@@ -382,9 +522,23 @@ Widget build(BuildContext context) {
                     ),
                     const SizedBox(height: 30),
 
+                    if (item['detected_unit'] != null &&
+                        item['detected_unit'] != item['unit'])
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Text(
+                          "ปริมาณที่ตรวจพบจากรูป: ${item['detected_quantity'] ?? '-'} ${item['detected_unit']} "
+                          "(แบ่งเป็น ${item['max_quantity'] ?? '-'} ${item['unit'] ?? ''})",
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            color: Colors.black54,
+                          ),
+                        ),
+                      ),
                     if (item['created_at'] != null)
                       Text(
-                        "สร้างเมื่อ ${_formatThaiDate(item['created_at'].toString())}",
+                        "เข้าตู้เย็นเมื่อ ${_formatThaiDate(item['created_at'].toString())}",
                         style: const TextStyle(
                           fontSize: 15,
                           color: Colors.black54,

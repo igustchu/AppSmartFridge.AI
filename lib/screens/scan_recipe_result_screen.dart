@@ -72,7 +72,11 @@ class _ScanRecipeResultScreenState extends State<ScanRecipeResultScreen> {
         .where((inv) => (inv['name'] ?? '').toString() == neededName)
         .toList();
     if (match.isEmpty) return false;
-    final haveQty = _toNum(match.first['quantity']);
+    // รวมทุกลอตของวัตถุดิบชื่อนี้ (ซื้อซ้ำจะแยกเป็นคนละลอตตามหลัก FIFO)
+    final haveQty = match.fold<num>(
+      0,
+      (sum, lot) => sum + _toNum(lot['quantity']),
+    );
     return haveQty >= neededQty;
   }
 

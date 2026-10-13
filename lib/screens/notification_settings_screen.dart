@@ -4,9 +4,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../services/notification_service.dart';
 import '../widgets/app_icons.dart';
+import '../utils/fridge_age.dart';
 
-/// หน้า "ตั้งค่า" การแจ้งเตือนวันหมดอายุ (ตามดีไซน์ใน Figma กลุ่ม "ALERT")
-/// เก็บค่า "รับการแจ้งเตือนล่วงหน้ากี่วัน" ไว้ใน user_metadata ของ Supabase Auth
+/// หน้า "ตั้งค่า" การแจ้งเตือนวัตถุดิบที่อยู่ในตู้เย็นนาน (ตามดีไซน์ใน Figma กลุ่ม "ALERT")
+/// เก็บค่า "แจ้งเตือนเมื่ออยู่ในตู้เย็นครบกี่วัน" ไว้ใน user_metadata ของ Supabase Auth
 /// (แนวทางเดียวกับ first_name/last_name/phone ใน edit_profile_screen.dart)
 /// เพื่อไม่ต้องสร้างตารางใหม่หรือขอสิทธิ์ฐานข้อมูลเพิ่ม
 class NotificationSettingsScreen extends StatefulWidget {
@@ -21,9 +22,9 @@ class _NotificationSettingsScreenState
     extends State<NotificationSettingsScreen> {
   final supabase = Supabase.instance.client;
 
-  static const List<int> options = [1, 3, 7, 14];
+  static const List<int> options = [3, 5, 7, 14];
 
-  int selected = 3;
+  int selected = defaultOldItemDays;
   bool dropdownOpen = false;
   bool saving = false;
 
@@ -31,13 +32,7 @@ class _NotificationSettingsScreenState
   void initState() {
     super.initState();
 
-    final saved = supabase.auth.currentUser?.userMetadata?['notify_days'];
-
-    if (saved is int) {
-      selected = saved;
-    } else if (saved != null) {
-      selected = int.tryParse(saved.toString()) ?? 3;
-    }
+    selected = readOldItemDays(supabase.auth.currentUser);
   }
 
   Future<void> save() async {
@@ -51,7 +46,7 @@ class _NotificationSettingsScreenState
       // ขอสิทธิ์แจ้งเตือนของระบบ (ถ้ายังไม่เคยอนุญาต จะเด้ง permission dialog)
       await NotificationService.init();
 
-      // ตั้งแจ้งเตือนวันหมดอายุใหม่ทั้งหมดทันทีตามค่าวันที่เพิ่งบันทึกไป
+      // ตั้งแจ้งเตือนใหม่ทั้งหมดทันทีตามค่าวันที่เพิ่งบันทึกไป
       // (ไม่ต้องรอให้ไปเปิดหน้าคลังก่อนถึงจะซิงก์)
       await NotificationService.scheduleExpiryReminders();
 
@@ -83,7 +78,7 @@ class _NotificationSettingsScreenState
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    "รับการแจ้งเตือนล่วงหน้า",
+                    "แจ้งเตือนเมื่ออยู่ในตู้เย็นครบ",
                     style: TextStyle(
                       fontWeight: FontWeight.bold,
                       fontSize: 16,
@@ -92,10 +87,16 @@ class _NotificationSettingsScreenState
                   ),
                   const SizedBox(height: 10),
                   buildDropdown(),
+                  const SizedBox(height: 8),
+                  const Text(
+                    "ของที่เน่าเร็ว (เช่น เนื้อสัตว์ ผักใบ) จะเตือนเร็วกว่านี้ "
+                    "เมื่ออยู่มาครบ 70% ของอายุการเก็บรักษา",
+                    style: TextStyle(fontSize: 13, color: Colors.black54),
+                  ),
                   const SizedBox(height: 16),
                   // ปุ่มทดสอบแจ้งเตือน — ใช้เช็กว่าได้รับสิทธิ์แจ้งเตือนแล้ว
                   // จริงไหม และแจ้งเตือนจริงๆ ขึ้นบนเครื่องไหม โดยไม่ต้องรอ
-                  // ให้มีวัตถุดิบใกล้หมดอายุจริงหรือรอถึงเวลาที่ตั้งไว้เลย
+                  // ให้มีวัตถุดิบที่อยู่นานจริงหรือรอถึงเวลาที่ตั้งไว้เลย
                   Center(
                     child: TextButton.icon(
                       onPressed: _testNotification,
@@ -152,7 +153,7 @@ class _NotificationSettingsScreenState
   // เช็กสิทธิ์แจ้งเตือนของเครื่องก่อน ถ้ายังไม่ได้อนุญาต จะพาไปหน้าตั้งค่า
   // ของระบบให้เปิดเอง (เพราะแอปขอซ้ำไม่ได้ถ้าผู้ใช้เคยกดปฏิเสธไปแล้ว) ถ้า
   // อนุญาตแล้วจะยิงแจ้งเตือนทดสอบขึ้นทันที ใช้เช็กได้เลยว่าระบบแจ้งเตือน
-  // ทำงานจริงหรือเปล่า โดยไม่ต้องรอให้มีของใกล้หมดอายุจริงหรือรอถึงเวลาที่ตั้งไว้
+  // ทำงานจริงหรือเปล่า โดยไม่ต้องรอให้มีของที่อยู่นานจริงหรือรอถึงเวลาที่ตั้งไว้
   Future<void> _testNotification() async {
     final status = await Permission.notification.status;
 

@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
 import '../widgets/recipe_flow_widgets.dart';
+import '../services/fridge_stock.dart';
 
 /// หน้ารายละเอียดสูตรอาหารที่บันทึกไว้ (ตามดีไซน์ใน Figma: "Smart Recipe" หน้าเมนู)
 /// เปิดจากการกดเลือกสูตรในหน้าคลังสูตรอาหาร
@@ -70,15 +71,12 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
   bool _isIngredientAvailable(Map<String, dynamic> needed) {
     final neededName = (needed['name'] ?? '').toString().trim().toLowerCase();
     final neededQty = _toNum(needed['use_quantity']);
-    final match = widget.inventory.where((inv) {
-      final invName = (inv['name'] ?? '').toString().trim().toLowerCase();
-      return invName.isNotEmpty &&
-          (invName == neededName ||
-              invName.contains(neededName) ||
-              neededName.contains(invName));
-    }).toList();
+    // รวมทุกลอตของวัตถุดิบชื่อนี้ (ซื้อซ้ำจะแยกเป็นคนละลอตตามหลัก FIFO)
+    final match = widget.inventory
+        .where((inv) => ingredientNameMatches(inv['name'], neededName))
+        .toList();
     if (match.isEmpty) return false;
-    final haveQty = _toNum(match.first['quantity']);
+    final haveQty = availableQuantity(widget.inventory, neededName);
     return haveQty >= neededQty;
   }
 
@@ -124,62 +122,33 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
       // วัตถุดิบไม่เจอ) ผู้ใช้จะได้รู้ว่าจริงๆ แล้วเกิดอะไรขึ้นกันแน่
       List<String> updateErrors = [];
 
-      // วนลูปเช็ควัตถุดิบที่ AI บอกว่าต้องใช้
+      // สำเนาคลังไว้หักในเครื่องด้วย จะได้เห็นจำนวนล่าสุดถ้าเมนูใช้วัตถุดิบ
+      // ชื่อเดียวกันซ้ำ (ไม่แก้ลิสต์ของหน้าก่อนหน้าโดยตรง)
+      final inventory = widget.inventory
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+
+      // วนลูปเช็ควัตถุดิบที่ AI บอกว่าต้องใช้ แล้วหักตามสัดส่วนแบบ FIFO (ลอตที่
+      // ใกล้หมดอายุ/เก่าที่สุดก่อน ถ้าไม่พอหักลอตถัดไปต่อ) ผ่าน fridge_stock.dart
       for (var needed in detailedIngredients) {
         String neededNameRaw = (needed['name'] ?? '').toString();
-        String neededName = neededNameRaw.trim().toLowerCase();
         num neededQty = _toNum(needed['use_quantity']);
 
-        if (neededName.isEmpty) continue;
+        if (neededNameRaw.trim().isEmpty) continue;
 
-        // หาวัตถุดิบในตู้เย็นที่ชื่อตรงกัน เทียบแบบยืดหยุ่น (ตัดช่องว่าง/ตัว
-        // พิมพ์เล็กใหญ่ และยอมให้ชื่อฝั่งหนึ่งเป็นส่วนหนึ่งของอีกฝั่ง) เพราะชื่อ
-        // ที่ AI ตอบกลับมาอาจไม่ตรงเป๊ะกับชื่อที่บันทึกไว้ในคลัง
-        var matchedItem = widget.inventory.where((inv) {
-          final invName = (inv['name'] ?? '').toString().trim().toLowerCase();
-          return invName.isNotEmpty &&
-              (invName == neededName ||
-                  invName.contains(neededName) ||
-                  neededName.contains(invName));
-        }).firstOrNull;
+        final result = await deductIngredientFifo(
+          supabase: supabase,
+          inventory: inventory,
+          name: neededNameRaw,
+          amount: neededQty,
+        );
 
-        if (matchedItem == null) {
+        if (!result.found) {
           notFoundNames.add(neededNameRaw);
-          continue;
-        }
-
-        if (neededQty > 0) {
-          num currentQty = _toNum(matchedItem['quantity']);
-          // หักตามจำนวนจริงแบบมีทศนิยมได้เลย (เช่นใช้ไป 0.5 ลูก ก็เหลือ 0.5
-          // ลูกจริงๆ ไม่ปัดขึ้นทั้งลูก) คอลัมน์ quantity ใน Supabase ต้องเป็น
-          // ชนิด numeric/decimal ถึงจะรับค่าทศนิยมแบบนี้ได้ — ถ้ายังเป็น
-          // integer อยู่ ต้องรัน `alter table fridge_items alter column
-          // quantity type numeric;` ใน Supabase SQL editor ก่อน ไม่งั้นฐาน
-          // ข้อมูลจะปฏิเสธค่าทศนิยมแบบเดียวกับตอนที่เจอ error "0.7" มาก่อน
-          num newQty = currentQty - neededQty;
-          if (newQty < 0) newQty = 0; // ป้องกันเลขติดลบ
-
-          // แยก try/catch เฉพาะจุดอัปเดตแต่ละชิ้น เพื่อให้วัตถุดิบชิ้นอื่นๆ ยัง
-          // หักต่อได้ปกติ ถึงแม้ชิ้นนี้จะอัปเดตไม่ผ่าน (เช่นโดนบล็อกสิทธิ์จาก
-          // ฝั่งฐานข้อมูล) แทนที่จะให้ทั้งฟังก์ชันพังแล้วไม่หักอะไรเลยสักชิ้น
-          try {
-            if (newQty <= 0) {
-              // ใช้วัตถุดิบชิ้นนี้หมดแล้ว ให้ลบออกจากคลังไปเลย แทนที่จะ
-              // ปล่อยให้ค้างเป็นแถวจำนวน 0 ชิ้น เพราะมันถูกใช้ไปแล้วจริงๆ
-              await supabase
-                  .from('fridge_items')
-                  .delete()
-                  .eq('item_id', matchedItem['item_id']);
-            } else {
-              await supabase
-                  .from('fridge_items')
-                  .update({'quantity': newQty})
-                  .eq('item_id', matchedItem['item_id']);
-            }
-            deductedCount++;
-          } catch (e) {
-            updateErrors.add("${matchedItem['name'] ?? neededNameRaw}: $e");
-          }
+        } else if (result.error != null) {
+          updateErrors.add("$neededNameRaw: ${result.error}");
+        } else if (neededQty > 0) {
+          deductedCount++;
         }
       }
 

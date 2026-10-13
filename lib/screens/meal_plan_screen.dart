@@ -9,6 +9,8 @@ import '../widgets/app_icons.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 import 'dart:convert';
 import '../config/api_keys.dart';
+import '../services/fridge_stock.dart';
+import '../utils/fridge_age.dart';
 
 
 
@@ -117,19 +119,10 @@ class _MealPlanScreenState
 
 
 
-      final fridgeList = fridgeItems
-
-          .map((item){
-
-
-        return
-
-          "${item['name']} ${item['quantity']} ${item['unit']}";
-
-
-      })
-
-          .join(", ");
+      // รวมลอตที่ชื่อ/หน่วยเดียวกันเป็นรายการเดียวก่อนส่งให้ Gemini
+      final fridgeList = inventoryPromptList(
+        List<Map<String, dynamic>>.from(fridgeItems),
+      );
 
 
 
@@ -149,36 +142,27 @@ class _MealPlanScreenState
       }
 
       // ===============================
-      // หาวัตถุดิบที่ใกล้หมดอายุ (เอาไว้ให้ Gemini เลือกใช้ก่อน)
+      // หาวัตถุดิบที่อยู่ในตู้เย็นนานแล้ว (เอาไว้ให้ Gemini เลือกใช้ก่อน)
       // อิงรูปแบบเดียวกับ ai_recipe_screen.dart
       // ===============================
-      final now = DateTime.now();
+      final oldItemDays = readOldItemDays(user);
       final expiringSoon = <Map<String, dynamic>>[];
 
       for (var item in fridgeItems) {
-        // ถ้าใช้วัตถุดิบชิ้นนี้หมดแล้ว (เหลือ 0) ก็ไม่ควรเสนอให้ AI ใช้/เตือน
-        // ว่าใกล้หมดอายุอีก เพราะไม่มีของเหลือให้ต้องรีบใช้แล้ว
-        final qty = item['quantity'];
-        if (qty != null) {
-          final qtyNum = qty is num ? qty : num.tryParse(qty.toString());
-          if (qtyNum != null && qtyNum <= 0) continue;
-        }
+        // เฉพาะของที่อยู่นานจนควรรีบใช้ (เกณฑ์ตามชนิดของ ดู isOldItem) และ
+        // ยังไม่ได้ใช้หมด
+        if (!isOldItem(item, oldItemDays)) continue;
 
-        if (item['expiry_date'] != null) {
-          final expiry = DateTime.parse(item['expiry_date']);
-          final diff = expiry.difference(now).inDays;
-          if (diff <= 3) {
-            expiringSoon.add({
-              'name': item['name'],
-              'days_remaining': diff,
-            });
-          }
-        }
+        expiringSoon.add({
+          'name': item['name'],
+          'days_in_fridge': daysInFridge(item['created_at']),
+        });
       }
 
+      // ของที่อยู่ในตู้เย็นนานที่สุดขึ้นก่อน
       expiringSoon.sort(
-        (a, b) => (a['days_remaining'] as int)
-            .compareTo(b['days_remaining'] as int),
+        (a, b) => (b['days_in_fridge'] as int)
+            .compareTo(a['days_in_fridge'] as int),
       );
 
       final expiringList = expiringSoon.map((e) => e['name']).join(", ");
@@ -276,7 +260,7 @@ class _MealPlanScreenState
       }
 
       // เมนูเก่าที่วัตถุดิบครบพอใช้ได้เลยตอนนี้ — สุ่มลำดับก่อน แล้วเอาเมนูที่
-      // ใช้ของใกล้หมดอายุขึ้นก่อน เพื่อความหลากหลายและช่วยเคลียร์ของหมดอายุ
+      // ใช้ของที่อยู่ในตู้เย็นนานขึ้นก่อน เพื่อความหลากหลายและช่วยเคลียร์ของเก่า
       final matched = library
           .where((m) => allIngredientsAvailable(m['ingredients'] as List))
           .toList();
@@ -443,7 +427,7 @@ $fridgeList
 
 
 
-วัตถุดิบที่ใกล้หมดอายุ (พยายามบังคับใช้ในเมนูก่อนวัตถุดิบอื่น):
+วัตถุดิบที่อยู่ในตู้เย็นมานานแล้ว (พยายามบังคับใช้ในเมนูก่อนวัตถุดิบอื่น):
 
 ${expiringList.isEmpty ? "ไม่มี" : expiringList}
 
@@ -488,7 +472,7 @@ ${usedNames.isEmpty ? "" : "ห้ามสร้างเมนูซ้ำก�
 
 - ห้ามสร้างวัตถุดิบที่ไม่มีในรายการ
 - ใช้วัตถุดิบที่มีอยู่ให้คุ้มค่า
-- ให้ความสำคัญกับวัตถุดิบที่ใกล้หมดอายุก่อนเป็นอันดับแรก
+- ให้ความสำคัญกับวัตถุดิบที่อยู่ในตู้เย็นมานานก่อนเป็นอันดับแรก
 - สามารถใช้วัตถุดิบเดิมซ้ำได้
 - ระบุ ingredients ของแต่ละมื้อ โดยเลือกจากวัตถุดิบที่มีเท่านั้น พร้อมปริมาณที่ใช้
 - ระบุ steps เป็นขั้นตอนการทำอาหารแบบละเอียด เรียงเป็นข้อๆ (array ของ string ภาษาไทย)

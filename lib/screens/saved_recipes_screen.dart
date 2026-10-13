@@ -5,6 +5,7 @@ import '../widgets/app_bottom_nav.dart';
 import '../widgets/recipe_flow_widgets.dart';
 import 'recipe_detail_screen.dart';
 import 'scan_recipe_screen.dart';
+import '../services/fridge_stock.dart';
 
 /// หน้าคลังสูตรอาหารที่สแกนไว้ (ตามดีไซน์ใน Figma: "Smart Recipe")
 /// ทุกสูตร + ความครบของวัตถุดิบ (X/Y) ดึงมาจาก Supabase จริงเสมอ
@@ -95,7 +96,9 @@ class _SavedRecipesScreenState extends State<SavedRecipesScreen> {
                 invName.contains(neededName) ||
                 neededName.contains(invName));
       }).toList();
-      if (match.isNotEmpty && _toNum(match.first['quantity']) >= neededQty) {
+      // รวมทุกลอตของวัตถุดิบชื่อนี้ (ซื้อซ้ำจะแยกเป็นคนละลอตตามหลัก FIFO)
+      if (match.isNotEmpty &&
+          availableQuantity(_inventory, neededName) >= neededQty) {
         have++;
       }
     }

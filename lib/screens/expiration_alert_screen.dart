@@ -3,9 +3,11 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
+import '../utils/fridge_age.dart';
+import '../utils/shelf_life.dart';
 import 'notification_settings_screen.dart';
 
-/// หน้า "แจ้งเตือนหมดอายุ" (ตามดีไซน์ใน Figma กลุ่ม "ALERT")
+/// หน้า "แจ้งเตือน" วัตถุดิบที่อยู่ในตู้เย็นนาน (ตามดีไซน์ใน Figma กลุ่ม "ALERT")
 /// เป็นหน้า root ของแท็บ "แจ้งเตือน" ในแถบเมนูด้านล่าง จึงไม่มีปุ่มย้อนกลับ
 class ExpirationAlertScreen extends StatefulWidget {
   const ExpirationAlertScreen({super.key});
@@ -17,17 +19,18 @@ class ExpirationAlertScreen extends StatefulWidget {
 class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
   final supabase = Supabase.instance.client;
 
-  // ตัวเลือกช่วงวันที่ต้องตรงกับ Figma: หมดแล้ว / 1 วัน / 3 วัน / 7 วัน / 14 วัน
-  // ใช้ -1 แทน "หมดแล้ว" (ของที่หมดอายุไปแล้วจริงๆ)
+  // ตัวเลือก "อยู่ในตู้เย็นมาแล้วตั้งแต่กี่วันขึ้นไป" ใช้ 0 แทน "ทั้งหมด"
+  // และ -1 แทน "ควรรีบใช้" (เกณฑ์ตามชนิดของ ดู isOldItem ใน fridge_age.dart)
   static const List<Map<String, Object>> dayOptions = [
-    {'label': 'หมดแล้ว', 'value': -1},
-    {'label': '1 วัน', 'value': 1},
-    {'label': '3 วัน', 'value': 3},
-    {'label': '7 วัน', 'value': 7},
-    {'label': '14 วัน', 'value': 14},
+    {'label': 'ควรรีบใช้', 'value': -1},
+    {'label': 'ทั้งหมด', 'value': 0},
+    {'label': '3 วัน+', 'value': 3},
+    {'label': '7 วัน+', 'value': 7},
+    {'label': '14 วัน+', 'value': 14},
   ];
 
   int selectedDays = -1;
+  int oldItemDays = defaultOldItemDays;
   String selectedCategory = "ทั้งหมด";
 
   List<Map<String, dynamic>> items = [];
@@ -52,49 +55,33 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
         .select()
         .eq('user_id', user.id);
 
-    final now = DateTime.now();
+    oldItemDays = readOldItemDays(user);
 
     final result = data.where((item) {
-      if (item['expiry_date'] == null) return false;
+      if (item['created_at'] == null) return false;
 
       // ถ้าใช้วัตถุดิบชิ้นนี้หมดแล้ว (เช่น กดทำอาหารจนหักจำนวนเหลือ 0) ก็ไม่ต้อง
-      // เตือนวันหมดอายุอีกต่อไป เพราะไม่มีของเหลือให้ต้องรีบใช้แล้ว (ของที่ไม่มี
-      // ระบุจำนวนไว้ ให้ถือว่ายังมีของอยู่ตามเดิม)
-      final qty = item['quantity'];
-      if (qty != null) {
-        final qtyNum = qty is num ? qty : num.tryParse(qty.toString());
-        if (qtyNum != null && qtyNum <= 0) return false;
-      }
-
-      final expiry = DateTime.parse(item['expiry_date'].toString());
-      final remain = expiry.difference(now).inDays;
+      // เตือนอีกต่อไป เพราะไม่มีของเหลือให้ต้องรีบใช้แล้ว
+      if (isUsedUp(Map<String, dynamic>.from(item))) return false;
 
       if (selectedDays == -1) {
-        // "หมดแล้ว" : เฉพาะของที่วันหมดอายุผ่านไปแล้วจริงๆ
-        return remain < 0;
+        return isOldItem(Map<String, dynamic>.from(item), oldItemDays);
       }
-
-      return remain >= 0 && remain <= selectedDays;
+      return daysInFridge(item['created_at']) >= selectedDays;
     }).map<Map<String, dynamic>>((e) {
       return Map<String, dynamic>.from(e);
     }).toList();
 
-    // เรียงตามวันหมดอายุใกล้สุดขึ้นก่อนเป็นหลักเสมอ (ของเร่งด่วนที่สุดต้องอยู่
-    // บนสุดจริงๆ ไม่ว่าจะอยู่หมวดไหน) ส่วนหมวดหมู่ใช้เป็นตัวตัดสินรองตอนวัน
-    // หมดอายุตรงกันพอดี ทำให้ของหมวดเดียวกัน+วันหมดอายุเดียวกันยังอยู่ติดกัน
-    // แต่จะไม่มีของที่เหลือวันน้อยกว่าถูกดันลงไปอยู่ใต้ของที่เหลือวันเยอะกว่า
+    // เรียงตามของที่อยู่ในตู้เย็นนานที่สุดขึ้นก่อนเสมอ (ของที่ควรรีบใช้ที่สุด
+    // ต้องอยู่บนสุดจริงๆ ไม่ว่าจะอยู่หมวดไหน) ส่วนหมวดหมู่ใช้เป็นตัวตัดสินรอง
     result.sort((a, b) {
-      final expiryCompare = DateTime.parse(a['expiry_date'].toString())
-          .compareTo(DateTime.parse(b['expiry_date'].toString()));
-      if (expiryCompare != 0) return expiryCompare;
+      final ageCompare = daysInFridge(b['created_at'])
+          .compareTo(daysInFridge(a['created_at']));
+      if (ageCompare != 0) return ageCompare;
 
       final catA = a['category']?.toString() ?? "อื่นๆ";
       final catB = b['category']?.toString() ?? "อื่นๆ";
-      final catCompare = catA.compareTo(catB);
-      if (catCompare != 0) return catCompare;
-
-      return DateTime.parse(a['created_at'].toString())
-          .compareTo(DateTime.parse(b['created_at'].toString()));
+      return catA.compareTo(catB);
     });
 
     if (mounted) {
@@ -154,27 +141,23 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
   }
 
   String formatDate(String date) {
-    final d = DateTime.parse(date);
+    final d = DateTime.parse(date).toLocal();
     return "${d.day}/${d.month}/${d.year + 543}";
   }
 
-  int remainDays(String date) {
-    return DateTime.parse(date).difference(DateTime.now()).inDays;
-  }
-
-  // สีการ์ดไล่ตามความเร่งด่วน: ควรใช้วันนี้/หมดแล้ว = แดง, ภายใน 3 วัน = เหลือง,
-  // ภายใน 7 วัน = เขียว, เกิน 7 วัน (จนถึง 14 วัน) = ไม่มีสี (ขาว)
-  Color cardColor(int days) {
-    if (days <= 1) return const Color(0xFFFADBD8);
-    if (days <= 3) return const Color(0xFFFFF7D0);
-    if (days <= 7) return const Color(0xFFDCF3DC);
+  // สีการ์ด: ของที่ควรรีบใช้แล้ว (ตามชนิดของ) = แดงเสมอ นอกนั้นไล่ตามระยะเวลา
+  // ที่อยู่ในตู้เย็น: 7 วันขึ้นไป = เหลือง, 3 วันขึ้นไป = เขียว, น้อยกว่า = ขาว
+  Color cardColor(int days, bool old) {
+    if (old || days >= 14) return const Color(0xFFFADBD8);
+    if (days >= 7) return const Color(0xFFFFF7D0);
+    if (days >= 3) return const Color(0xFFDCF3DC);
     return Colors.white;
   }
 
-  Color statusColor(int days) {
-    if (days <= 1) return const Color(0xffD64545);
-    if (days <= 3) return const Color(0xffC9A227);
-    if (days <= 7) return const Color(0xff3F9142);
+  Color statusColor(int days, bool old) {
+    if (old || days >= 14) return const Color(0xffD64545);
+    if (days >= 7) return const Color(0xffC9A227);
+    if (days >= 3) return const Color(0xff3F9142);
     return Colors.grey.shade600;
   }
 
@@ -222,7 +205,7 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
                   NotificationIcon(size: 22),
                   SizedBox(width: 10),
                   Text(
-                    "แจ้งเตือนหมดอายุ",
+                    "แจ้งเตือนวัตถุดิบ",
                     style: TextStyle(
                       fontWeight: FontWeight.w500,
                       fontSize: 16,
@@ -303,7 +286,7 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            "ดูวันหมดอายุ",
+            "อยู่ในตู้เย็นมาแล้ว",
             style: TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.bold,
@@ -387,7 +370,7 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      selectedDays == -1 ? "หมดอายุ" : "ใกล้หมดอายุ",
+                      "อยู่ในตู้เย็น",
                       style: const TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 16,
@@ -395,8 +378,10 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
                     ),
                     Text(
                       selectedDays == -1
-                          ? "${showItems.length} รายการ หมดอายุแล้ว"
-                          : "${showItems.length} รายการ ภายใน $selectedDays วัน",
+                          ? "${showItems.length} รายการ ควรรีบใช้"
+                          : selectedDays == 0
+                          ? "${showItems.length} รายการทั้งหมด"
+                          : "${showItems.length} รายการ อยู่มา $selectedDays วันขึ้นไป",
                       style: const TextStyle(color: Colors.grey),
                     ),
                   ],
@@ -467,13 +452,14 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
           ),
 
         ...showItems.map((item) {
-          final days = remainDays(item['expiry_date']);
+          final days = daysInFridge(item['created_at']);
+          final old = isOldItem(item, oldItemDays);
 
           return Container(
             margin: const EdgeInsets.only(bottom: 15),
             padding: const EdgeInsets.all(18),
             decoration: BoxDecoration(
-              color: cardColor(days),
+              color: cardColor(days, old),
               borderRadius: BorderRadius.circular(20),
             ),
             child: Column(
@@ -510,31 +496,26 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
                 ),
                 const SizedBox(height: 10),
                 Text("📥 เพิ่มเข้าตู้เย็น: ${formatDate(item['created_at'])}"),
-                Text(
-                  "⏳ หมดอายุ: ${formatDate(item['expiry_date'])}",
-                  style: const TextStyle(
-                    color: Colors.red,
-                    fontWeight: FontWeight.w600,
+                if (item['storage'] != null)
+                  Text(
+                    "${storageEmoji(item['storage'])} เก็บใน${storageLabel(item['storage'])}",
                   ),
-                ),
                 const SizedBox(height: 8),
                 Row(
                   children: [
                     Icon(
                       Icons.info_outline,
                       size: 15,
-                      color: statusColor(days),
+                      color: statusColor(days, old),
                     ),
                     const SizedBox(width: 5),
                     Text(
-                      days < 0
-                          ? "หมดอายุแล้ว ${-days} วัน"
-                          : days <= 1
-                              ? "ควรใช้วันนี้"
-                              : "เหลืออีก $days วัน",
+                      old
+                          ? "${fridgeAgeText(item['created_at'])} · ควรรีบใช้"
+                          : fridgeAgeText(item['created_at']),
                       style: TextStyle(
                         fontWeight: FontWeight.bold,
-                        color: statusColor(days),
+                        color: statusColor(days, old),
                       ),
                     ),
                   ],

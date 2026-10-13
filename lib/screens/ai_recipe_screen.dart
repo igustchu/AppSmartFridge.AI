@@ -6,6 +6,8 @@ import 'recipe_detail_screen.dart'; // ✅ นำเข้าหน้าให�
 import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
 import '../config/api_keys.dart';
+import '../services/fridge_stock.dart';
+import '../utils/fridge_age.dart';
 
 class AiRecipeScreen extends StatefulWidget {
   const AiRecipeScreen({super.key});
@@ -19,7 +21,12 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
   bool _isGenerating = false;
 
   List<Map<String, dynamic>> _inventory = [];
-  List<Map<String, dynamic>> _expiringSoon = [];
+  List<Map<String, dynamic>> _oldItems = [];
+
+  // วัตถุดิบทุกชิ้นที่ยังเหลืออยู่ เรียงจากอยู่ในตู้เย็นนานที่สุด ใช้แสดงในการ์ด
+  // "วัตถุดิบในตู้เย็น" (แสดงเสมอ ไม่ใช่เฉพาะของที่อยู่นานเกินกำหนด)
+  List<Map<String, dynamic>> _fridgeByAge = [];
+  int _oldItemDays = defaultOldItemDays;
   List<dynamic> _generatedRecipes = []; // เก็บเมนูที่ AI สร้างให้
 
   // ตัวแปรสำหรับ Filter
@@ -63,40 +70,38 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
       final response = await supabase.from('fridge_items').select();
       final data = List<Map<String, dynamic>>.from(response);
 
-      List<Map<String, dynamic>> expiring = [];
-      final now = DateTime.now();
+      List<Map<String, dynamic>> oldItems = [];
+      List<Map<String, dynamic>> byAge = [];
+      final oldItemDays = readOldItemDays(supabase.auth.currentUser);
 
       for (var item in data) {
         // ถ้าใช้วัตถุดิบชิ้นนี้หมดแล้ว (เช่น กดทำอาหารจนหักจำนวนเหลือ 0) ก็ไม่
-        // ควรโผล่ในลิสต์ "ใกล้หมดอายุ" อีกต่อไป เพราะไม่มีของเหลือให้ต้องรีบ
+        // ควรโผล่ในลิสต์ "อยู่ในตู้เย็นนาน" อีกต่อไป เพราะไม่มีของเหลือให้ต้องรีบ
         // ใช้แล้ว (ของที่ไม่มีระบุจำนวนไว้ ให้ถือว่ายังมีของอยู่ตามเดิม)
-        final qty = item['quantity'];
-        if (qty != null) {
-          final qtyNum = qty is num ? qty : num.tryParse(qty.toString());
-          if (qtyNum != null && qtyNum <= 0) continue;
-        }
+        if (isUsedUp(item)) continue;
 
-        if (item['expiry_date'] != null) {
-          final expiry = DateTime.parse(item['expiry_date']);
-          final diff = expiry.difference(now).inDays;
-          item['days_remaining'] = diff; // เก็บค่าไว้ใช้แสดงผล
-          if (diff <= 3) {
-            expiring.add(item);
-          }
-        } else {
-          item['days_remaining'] = 999;
+        final days = daysInFridge(item['created_at']);
+        item['days_in_fridge'] = days; // เก็บค่าไว้ใช้แสดงผล
+        byAge.add(item);
+        // ควรเอาไปทำอาหารก่อน: อยู่นานจนควรรีบใช้ หรือเหลืออีกไม่เกิน 3 วันจะ
+        // หมดอายุ (รวมของที่หมดอายุไปแล้วด้วย จะได้เห็นและจัดการ)
+        final expiry = daysUntilExpiry(item['expiry_date']);
+        if (isOldItem(item, oldItemDays) || (expiry != null && expiry <= 3)) {
+          oldItems.add(item);
         }
       }
 
-      // เรียงลำดับตามวันหมดอายุ
-      expiring.sort(
-        (a, b) =>
-            (a['days_remaining'] as int).compareTo(b['days_remaining'] as int),
-      );
+      // เรียงของที่จะหมดอายุก่อนขึ้นบน (ไม่มีวันหมดอายุไว้ท้าย ถ้าหมดอายุวัน
+      // เดียวกัน ของที่อยู่ในตู้เย็นนานกว่าขึ้นก่อน) — ลำดับนี้คือลำดับที่ควร
+      // เอาไปทำอาหารก่อน และส่งให้ AI ตามลำดับนี้ด้วย
+      oldItems.sort(compareFifo);
+      byAge.sort(compareFifo);
 
       setState(() {
         _inventory = data;
-        _expiringSoon = expiring;
+        _oldItems = oldItems;
+        _fridgeByAge = byAge;
+        _oldItemDays = oldItemDays;
         _isLoadingData = false;
       });
     } catch (e) {
@@ -128,21 +133,20 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
 
       // เตรียมรายชื่อวัตถุดิบเป็น Text (ไม่เอาของที่หมดแล้ว/เหลือ 0 ชิ้น มา
       // เสนอให้ AI ใช้ เพราะจริงๆ ไม่มีของเหลือให้ทำอาหารแล้ว)
-      String allItems = _inventory
-          .where((e) {
-            final qty = e['quantity'];
-            if (qty == null) return true;
-            final qtyNum = qty is num ? qty : num.tryParse(qty.toString());
-            return qtyNum == null || qtyNum > 0;
+      // (ลอตที่ชื่อ/หน่วยเดียวกันจะถูกรวมเป็นรายการเดียว)
+      String allItems = inventoryPromptList(_inventory);
+      String oldItemNames = _oldItems
+          .map((e) {
+            final expiry = daysUntilExpiry(e['expiry_date']);
+            final expiryNote = expiry == null ? '' : ', ${expiryText(expiry)}';
+            return "${e['name']} (อยู่มา ${fridgeAgeDuration(e['created_at'])}$expiryNote)";
           })
-          .map((e) => "${e['name']} (${e['quantity']} ${e['unit']})")
           .join(", ");
-      String expiringItems = _expiringSoon.map((e) => e['name']).join(", ");
 
       final prompt = TextPart("""
         คุณคือเชฟอัจฉริยะ ช่วยคิดเมนูอาหาร 3 เมนู ที่สามารถทำได้จากวัตถุดิบเหล่านี้เป็นหลัก
         วัตถุดิบที่มี: $allItems
-        วัตถุดิบที่ใกล้หมดอายุ (พยายามบังคับใช้ในเมนู): ${expiringItems.isEmpty ? 'ไม่มี' : expiringItems}
+        วัตถุดิบที่ควรใช้ก่อน เรียงจากที่จะหมดอายุก่อน (พยายามบังคับใช้ในเมนู โดยใช้ตัวแรกๆ ก่อน): ${oldItemNames.isEmpty ? 'ไม่มี' : oldItemNames}
 
         เงื่อนไขเพิ่มเติม:
         - ประเภทอาหาร: ${_selectedCategory == 'ทั้งหมด' ? 'อะไรก็ได้' : _selectedCategory}
@@ -312,15 +316,15 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 20.0),
                     child: Text(
-                      "สร้างเมนูจากวัตถุดิบที่มี โดยจัดลำดับจากของที่ใกล้หมดอายุก่อน",
+                      "สร้างเมนูจากวัตถุดิบที่มี โดยใช้ของที่ใกล้หมดอายุก่อน",
                       style: TextStyle(color: Colors.grey.shade700, fontSize: 13),
                     ),
                   ),
                 ),
                 const SliverToBoxAdapter(child: SizedBox(height: 10)),
 
-                // 2. กล่องแจ้งเตือนของใกล้หมดอายุ
-                if (_expiringSoon.isNotEmpty)
+                // 2. กล่องแจ้งเตือนของที่อยู่ในตู้เย็นนาน
+                if (_fridgeByAge.isNotEmpty)
                   SliverToBoxAdapter(
                     child: Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 20.0),
@@ -349,7 +353,7 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
                                 ),
                                 const SizedBox(width: 10),
                                 const Text(
-                                  "วัตถุดิบที่ใกล้หมดอายุ",
+                                  "วัตถุดิบในตู้เย็น",
                                   style: TextStyle(
                                     fontWeight: FontWeight.bold,
                                     fontSize: 16,
@@ -359,7 +363,11 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
                               ],
                             ),
                             const SizedBox(height: 10),
-                            ..._expiringSoon.map((item) {
+                            ..._fridgeByAge.map((item) {
+                              final isOld = isOldItem(item, _oldItemDays);
+                              final expiry = daysUntilExpiry(
+                                item['expiry_date'],
+                              );
                               return Padding(
                                 padding: const EdgeInsets.only(
                                   bottom: 6.0,
@@ -369,19 +377,46 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
                                   mainAxisAlignment:
                                       MainAxisAlignment.spaceBetween,
                                   children: [
-                                    Text(
-                                      "${item['name']} (${item['quantity']} ${item['unit']})",
-                                      style: const TextStyle(
-                                        color: Colors.black87,
+                                    Expanded(
+                                      child: Text(
+                                        "${item['name']} (${item['quantity']} ${item['unit']})",
+                                        style: const TextStyle(
+                                          color: Colors.black87,
+                                        ),
                                       ),
                                     ),
-                                    Text(
-                                      "เหลือ ${item['days_remaining']} วัน",
-                                      style: const TextStyle(
-                                        color: Colors.red,
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 13,
-                                      ),
+                                    // ของที่อยู่ครบตามวันที่ตั้งไว้ = สีแดง (ควร
+                                    // รีบใช้ AI จะเลือกใช้ก่อน) นอกนั้นสีฟ้า
+                                    Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.end,
+                                      children: [
+                                        Text(
+                                          "อยู่มา ${fridgeAgeDuration(item['created_at'])}",
+                                          style: TextStyle(
+                                            color: isOld
+                                                ? Colors.red
+                                                : const Color(0xff5189C9),
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                        // จะหมดอายุในอีกกี่วัน (เหลือไม่เกิน 3
+                                        // วัน = แดง, นอกนั้นเทา)
+                                        if (expiry != null)
+                                          Text(
+                                            expiryText(expiry),
+                                            style: TextStyle(
+                                              color: expiry <= 3
+                                                  ? Colors.red
+                                                  : Colors.black54,
+                                              fontSize: 12,
+                                              fontWeight: expiry <= 3
+                                                  ? FontWeight.bold
+                                                  : FontWeight.normal,
+                                            ),
+                                          ),
+                                      ],
                                     ),
                                   ],
                                 ),
@@ -394,11 +429,11 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
                   ),
 
                 // ช่องว่างก่อนการ์ด "ประเภทอาหาร" — เดิมไม่มีช่องว่างตรงนี้เลย
-                // ทำให้ระยะห่างระหว่างการ์ดแต่ละใบไม่เท่ากัน (การ์ดวัตถุดิบใกล้
-                // หมดอายุติดกับการ์ดประเภทอาหารพอดี ในขณะที่การ์ดประเภทอาหารกับ
+                // ทำให้ระยะห่างระหว่างการ์ดแต่ละใบไม่เท่ากัน (การ์ดวัตถุดิบที่อยู่
+                // นานติดกับการ์ดประเภทอาหารพอดี ในขณะที่การ์ดประเภทอาหารกับ
                 // การ์ดเวลาห่างกัน 15) เพิ่มให้เท่ากับช่องว่างระหว่างการ์ดอื่นๆ
                 // เพื่อให้จังหวะแนวตั้ง (Y) สม่ำเสมอตลอดทั้งหน้า
-                if (_expiringSoon.isNotEmpty)
+                if (_fridgeByAge.isNotEmpty)
                   const SliverToBoxAdapter(child: SizedBox(height: 15)),
 
                 // 3. ตัวกรอง (Filter)

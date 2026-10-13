@@ -6,6 +6,7 @@ import 'package:google_generative_ai/google_generative_ai.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../utils/category_icons.dart';
+import '../utils/shelf_life.dart';
 import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
 import '../widgets/recipe_flow_widgets.dart';
@@ -139,7 +140,9 @@ class _ImageScanningState extends State<ImageScanning> {
   "name":"ชื่อวัตถุดิบ",
   "quantity":1,
   "unit":"หน่วย",
-  "expiry_days":7
+  "shelf_type":"chicken",
+  "fridge_days":2,
+  "freezer_days":120
  }
 ]
 ห้ามมีข้อความอธิบายอื่น
@@ -147,6 +150,17 @@ class _ImageScanningState extends State<ImageScanning> {
 
 สำคัญ: ค่า "category" ต้องเลือกจากรายการนี้เท่านั้น ห้ามพิมพ์คำอื่นนอกเหนือจากนี้เด็ดขาด:
 ${fixedCategories.join(", ")}
+
+ค่า "quantity" และ "unit" คือปริมาณที่เห็นจริงในรูป เช่น 1 แพ็ค, 2 หัว, 6 ฟอง, 500 กรัม
+(quantity เป็นตัวเลข ใช้ทศนิยมได้)
+
+ค่า "shelf_type" คือประเภทสำหรับคำนวณอายุการเก็บรักษา ให้เลือกคีย์จากรายการนี้
+ถ้าวัตถุดิบไม่ตรงกับประเภทไหนเลยให้ใส่ "other":
+${shelfTypePromptList()}
+
+ค่า "fridge_days" คือจำนวนวันที่วัตถุดิบนี้ (ในสภาพที่เห็นในรูป) เก็บในช่องปกติของตู้เย็นได้อย่างปลอดภัย
+ค่า "freezer_days" คือจำนวนวันที่เก็บในช่องแช่แข็งได้ ถ้าไม่ควรแช่แข็งให้ใส่ null
+ประเมินตามหลักความปลอดภัยของอาหารสำหรับชนิดนั้นจริงๆ เป็นตัวเลขจำนวนเต็ม
 """);
 
       final response = await model

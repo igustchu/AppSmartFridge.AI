@@ -5,29 +5,29 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
-/// บริการแจ้งเตือนวันหมดอายุของวัตถุดิบ — อ่านค่า "รับการแจ้งเตือนล่วงหน้า
-/// กี่วัน" (notify_days) ที่ผู้ใช้ตั้งไว้ในหน้า notification_settings_screen.dart
-/// (เก็บใน user_metadata ของ Supabase Auth) แล้วเทียบกับวันหมดอายุจริงของ
-/// วัตถุดิบแต่ละชิ้นใน fridge_items เพื่อยิงแจ้งเตือนจริงไปยังเครื่องผู้ใช้
+import '../utils/fridge_age.dart';
+
+/// บริการแจ้งเตือนวัตถุดิบที่อยู่ในตู้เย็นนานแล้ว — อ่านค่า "แจ้งเตือนเมื่อ
+/// อยู่ในตู้เย็นครบกี่วัน" (notify_days) ที่ผู้ใช้ตั้งไว้ในหน้า
+/// notification_settings_screen.dart (เก็บใน user_metadata ของ Supabase Auth)
+/// แล้วเทียบกับวันที่เพิ่มวัตถุดิบแต่ละชิ้นเข้าตู้เย็น (created_at) ใน
+/// fridge_items เพื่อยิงแจ้งเตือนจริงไปยังเครื่องผู้ใช้
 ///
 /// ใช้ 2 กลไกร่วมกันเพราะแอปนี้เป็น client-only (ไม่มีเซิร์ฟเวอร์/ฟังก์ชัน
 /// แบ็กเอนด์คอยรันตอนแอปปิดอยู่):
-/// 1. scheduleExpiryReminders() — ตั้งแจ้งเตือนล่วงหน้าไว้ล่วงหน้าให้ระบบ
-///    ปฏิบัติการยิงเองตามเวลาที่กำหนด (09:00 ของวันที่ "เหลืออีก N วันตามที่
-///    ตั้งไว้") ผ่าน flutter_local_notifications ซึ่งจะทำงานแม้แอปถูกปิดอยู่
-///    เพราะระบบปฏิบัติการเป็นคนยิงให้ ไม่ใช่ตัวแอป
+/// 1. scheduleExpiryReminders() — ตั้งแจ้งเตือนล่วงหน้าไว้ให้ระบบปฏิบัติการ
+///    ยิงเองตามเวลาที่กำหนด (09:00 ของวันที่ของชิ้นนั้น "อยู่ในตู้เย็นครบ N วัน
+///    ตามที่ตั้งไว้") ผ่าน flutter_local_notifications ซึ่งจะทำงานแม้แอปถูกปิด
+///    อยู่ เพราะระบบปฏิบัติการเป็นคนยิงให้ ไม่ใช่ตัวแอป
 /// 2. checkAndShowDueReminders() — เช็กซ้ำทุกครั้งที่เปิดแอป/หน้าคลัง ว่ามี
-///    วัตถุดิบที่ตอนนี้อยู่ในช่วงใกล้หมดอายุ (0 ถึง notify_days วัน) แล้วยัง
-///    ไม่เคยเตือนวันนี้หรือยัง ถ้ายังไม่เคย จะยิงแจ้งเตือนทันที (กันเคสที่
-///    เพิ่งตั้งวันแจ้งเตือน หรือเพิ่งเพิ่มของที่ใกล้หมดอายุอยู่แล้ว ให้ยังได้
-///    รับแจ้งเตือนโดยไม่ต้องรอรอบถัดไป) — ทำให้ตราบใดที่ผู้ใช้เปิดแอปอย่าง
-///    น้อยวันละครั้ง จะได้รับการเตือนซ้ำทุกวันที่ยังอยู่ในช่วงใกล้หมดอายุจริง
-///    ตามที่ตั้งค่าไว้
+///    วัตถุดิบที่ตอนนี้อยู่ในตู้เย็นมาแล้วตั้งแต่ notify_days วันขึ้นไป แล้วยัง
+///    ไม่เคยเตือนวันนี้หรือยัง ถ้ายังไม่เคย จะยิงแจ้งเตือนทันที — ทำให้ตราบใด
+///    ที่ผู้ใช้เปิดแอปอย่างน้อยวันละครั้ง จะได้รับการเตือนซ้ำทุกวันที่ยังมีของ
+///    ที่อยู่นานค้างอยู่
 ///
 /// ข้อจำกัดที่ควรรู้: บน iOS ระบบปฏิบัติการจำกัดจำนวนแจ้งเตือนที่ "ตั้งรอไว้ล่วงหน้า"
 /// (pending) ได้สูงสุด 64 รายการต่อแอป ถ้ามีวัตถุดิบเยอะมากพร้อมกัน อาจมีบาง
-/// รายการที่ตั้งล่วงหน้าไม่ติด (ระบบจะเก็บเฉพาะ 64 รายการที่ใกล้ถึงเวลาที่สุด)
-/// แต่กลไกข้อ 2 (เช็กตอนเปิดแอป) จะช่วยชดเชยส่วนนี้ได้เสมอตราบใดที่เปิดแอปอยู่
+/// รายการที่ตั้งล่วงหน้าไม่ติด แต่กลไกข้อ 2 (เช็กตอนเปิดแอป) จะช่วยชดเชยได้เสมอ
 class NotificationService {
   static final notifications = FlutterLocalNotificationsPlugin();
 
@@ -69,8 +69,8 @@ class NotificationService {
       const NotificationDetails(
         android: AndroidNotificationDetails(
           'expiry_channel',
-          'แจ้งเตือนวันหมดอายุ',
-          channelDescription: 'แจ้งเตือนเมื่อวัตถุดิบใกล้หมดอายุ',
+          'แจ้งเตือนวัตถุดิบในตู้เย็น',
+          channelDescription: 'แจ้งเตือนเมื่อวัตถุดิบอยู่ในตู้เย็นนานแล้ว',
           importance: Importance.high,
           priority: Priority.high,
         ),
@@ -96,8 +96,8 @@ class NotificationService {
       const NotificationDetails(
         android: AndroidNotificationDetails(
           'expiry_channel',
-          'แจ้งเตือนวันหมดอายุ',
-          channelDescription: 'แจ้งเตือนเมื่อวัตถุดิบใกล้หมดอายุ',
+          'แจ้งเตือนวัตถุดิบในตู้เย็น',
+          channelDescription: 'แจ้งเตือนเมื่อวัตถุดิบอยู่ในตู้เย็นนานแล้ว',
           importance: Importance.high,
           priority: Priority.high,
         ),
@@ -123,11 +123,11 @@ class NotificationService {
   static int _stableId(String key) => key.hashCode & 0x7fffffff;
 
   /// ตั้งแจ้งเตือนล่วงหน้าให้ระบบปฏิบัติการยิงเองตามเวลาที่กำหนด สำหรับ
-  /// วัตถุดิบทุกชิ้นในคลังของผู้ใช้ปัจจุบัน โดยอิงจากค่า "รับการแจ้งเตือน
-  /// ล่วงหน้ากี่วัน" (notify_days) ที่ตั้งไว้ในหน้าตั้งค่า
+  /// วัตถุดิบทุกชิ้นในคลังของผู้ใช้ปัจจุบัน โดยอิงจากค่า "แจ้งเตือนเมื่ออยู่
+  /// ในตู้เย็นครบกี่วัน" (notify_days) ที่ตั้งไว้ในหน้าตั้งค่า
   ///
   /// ล้างของเดิมแล้วตั้งใหม่ทั้งหมดทุกครั้ง เพื่อไม่ให้มีแจ้งเตือนค้างของ
-  /// วัตถุดิบที่ถูกลบ/ทำอาหารไปแล้ว หรือวันหมดอายุที่ถูกแก้ไขใหม่
+  /// วัตถุดิบที่ถูกลบ/ทำอาหารไปแล้ว หรือวันที่เข้าตู้เย็นที่ถูกแก้ไขใหม่
   static Future<void> scheduleExpiryReminders() async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
@@ -135,7 +135,7 @@ class NotificationService {
 
     await init();
 
-    final notifyDays = _readNotifyDays(user);
+    final notifyDays = readOldItemDays(user);
 
     List<Map<String, dynamic>> items;
     try {
@@ -156,29 +156,28 @@ class NotificationService {
     final now = DateTime.now();
 
     for (final item in items) {
-      final expiryRaw = item['expiry_date'];
-      if (expiryRaw == null) continue;
+      final createdRaw = item['created_at'];
+      if (createdRaw == null) continue;
+      if (isUsedUp(item)) continue; // ใช้หมดแล้ว ไม่ต้องเตือน
 
-      final qty = item['quantity'];
-      final qtyNum = qty is num ? qty : num.tryParse(qty?.toString() ?? '');
-      if (qtyNum != null && qtyNum <= 0) continue; // ใช้หมดแล้ว ไม่ต้องเตือน
-
-      DateTime expiryDate;
+      DateTime addedDate;
       try {
-        expiryDate = DateTime.parse(expiryRaw.toString());
+        addedDate = DateTime.parse(createdRaw.toString()).toLocal();
       } catch (_) {
         continue;
       }
-      final expiryDay = DateTime(
-        expiryDate.year,
-        expiryDate.month,
-        expiryDate.day,
+      final addedDay = DateTime(
+        addedDate.year,
+        addedDate.month,
+        addedDate.day,
       );
 
       final name = item['name']?.toString() ?? 'วัตถุดิบ';
       final itemId = item['item_id']?.toString() ?? name;
 
-      final triggerDay = expiryDay.subtract(Duration(days: notifyDays));
+      // เกณฑ์ของแต่ละชิ้น: ไม่เกินค่าที่ตั้งไว้ และเร็วขึ้นสำหรับของที่เน่าเร็ว
+      final itemDays = oldThresholdFor(item, notifyDays);
+      final triggerDay = addedDay.add(Duration(days: itemDays));
       final triggerTime = DateTime(
         triggerDay.year,
         triggerDay.month,
@@ -188,19 +187,19 @@ class NotificationService {
 
       // ตั้งล่วงหน้าได้เฉพาะเวลาที่ยังไม่ผ่านไปเท่านั้น (ตั้งเวลาย้อนอดีตไม่ได้)
       // ถ้าช่วงที่ควรเตือนผ่านไปแล้ว (เช่นเพิ่งเปลี่ยนค่าวันแจ้งเตือน หรือเพิ่ง
-      // เพิ่มของที่ใกล้หมดอายุอยู่แล้ว) checkAndShowDueReminders() จะช่วยจับแทน
+      // มีของที่อยู่นานเกินกำหนดอยู่แล้ว) checkAndShowDueReminders() จะช่วยจับแทน
       if (triggerTime.isAfter(now)) {
         try {
           await notifications.zonedSchedule(
             _stableId(itemId),
             "🔔 SmartFridge",
-            "$name จะหมดอายุในอีก $notifyDays วัน — อย่าลืมเอาไปทำอาหารก่อนหมดอายุนะ!",
+            "$name อยู่ในตู้เย็นมาแล้ว $itemDays วัน — ควรรีบเอาไปทำอาหารนะ!",
             _toTz(triggerTime),
             const NotificationDetails(
               android: AndroidNotificationDetails(
                 'expiry_channel',
-                'แจ้งเตือนวันหมดอายุ',
-                channelDescription: 'แจ้งเตือนเมื่อวัตถุดิบใกล้หมดอายุ',
+                'แจ้งเตือนวัตถุดิบในตู้เย็น',
+                channelDescription: 'แจ้งเตือนเมื่อวัตถุดิบอยู่ในตู้เย็นนานแล้ว',
                 importance: Importance.high,
                 priority: Priority.high,
               ),
@@ -222,13 +221,13 @@ class NotificationService {
       }
     }
 
-    // ถือโอกาสเช็กด้วยเลยว่ามีของที่อยู่ในช่วงใกล้หมดอายุ "อยู่แล้วตอนนี้"
+    // ถือโอกาสเช็กด้วยเลยว่ามีของที่อยู่นานเกินกำหนด "อยู่แล้วตอนนี้"
     // ที่พลาดช่วงเวลาที่ควรตั้งแจ้งเตือนไปแล้วหรือเปล่า จะได้ไม่พลาดแจ้งเตือน
     unawaited(checkAndShowDueReminders(items: items, notifyDays: notifyDays));
   }
 
-  /// เช็กว่ามีวัตถุดิบที่ตอนนี้อยู่ในช่วงใกล้หมดอายุ (เหลือ 0 ถึง notify_days
-  /// วัน) หรือไม่ ถ้ามีและยังไม่เคยแจ้งเตือนวันนี้ ให้ยิงแจ้งเตือนทันทีหนึ่งครั้ง
+  /// เช็กว่ามีวัตถุดิบที่ตอนนี้อยู่ในตู้เย็นมาแล้วตั้งแต่ notify_days วันขึ้นไป
+  /// หรือไม่ ถ้ามีและยังไม่เคยแจ้งเตือนวันนี้ ให้ยิงแจ้งเตือนทันทีหนึ่งครั้ง
   /// (รวมทุกรายการเป็นข้อความเดียว) แล้วจำวันที่แจ้งเตือนล่าสุดไว้ใน
   /// user_metadata (แนวทางเดียวกับ notify_days) เพื่อไม่ให้เตือนซ้ำหลายครั้ง
   /// ในวันเดียวกันตอนเปิดแอปซ้ำๆ — เรียกซ้ำได้ทุกครั้งที่เปิดแอป/หน้าคลัง
@@ -241,7 +240,7 @@ class NotificationService {
     final user = supabase.auth.currentUser;
     if (user == null) return;
 
-    final days = notifyDays ?? _readNotifyDays(user);
+    final days = notifyDays ?? readOldItemDays(user);
 
     List<Map<String, dynamic>> fridgeItems;
     if (items != null) {
@@ -262,34 +261,14 @@ class NotificationService {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
 
-    final List<String> expiringNames = [];
+    final List<String> oldItemNames = [];
     for (final item in fridgeItems) {
-      final expiryRaw = item['expiry_date'];
-      if (expiryRaw == null) continue;
-
-      final qty = item['quantity'];
-      final qtyNum = qty is num ? qty : num.tryParse(qty?.toString() ?? '');
-      if (qtyNum != null && qtyNum <= 0) continue;
-
-      DateTime expiryDate;
-      try {
-        expiryDate = DateTime.parse(expiryRaw.toString());
-      } catch (_) {
-        continue;
-      }
-      final expiryDay = DateTime(
-        expiryDate.year,
-        expiryDate.month,
-        expiryDate.day,
-      );
-      final daysRemaining = expiryDay.difference(today).inDays;
-
-      if (daysRemaining >= 0 && daysRemaining <= days) {
-        expiringNames.add(item['name']?.toString() ?? 'วัตถุดิบ');
+      if (isOldItem(item, days)) {
+        oldItemNames.add(item['name']?.toString() ?? 'วัตถุดิบ');
       }
     }
 
-    if (expiringNames.isEmpty) return;
+    if (oldItemNames.isEmpty) return;
 
     final todayKey =
         "${today.year.toString().padLeft(4, '0')}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}";
@@ -297,11 +276,11 @@ class NotificationService {
         user.userMetadata?['last_expiry_notify_date']?.toString();
     if (lastNotified == todayKey) return; // วันนี้เตือนไปแล้ว ไม่เตือนซ้ำ
 
-    final String message = expiringNames.length == 1
-        ? "${expiringNames.first} ใกล้หมดอายุแล้ว รีบเอาไปทำอาหารก่อนหมดนะ!"
-        : "มีวัตถุดิบใกล้หมดอายุ ${expiringNames.length} รายการ: "
-              "${expiringNames.take(5).join(', ')}"
-              "${expiringNames.length > 5 ? ' และอื่นๆ' : ''}";
+    final String message = oldItemNames.length == 1
+        ? "${oldItemNames.first} อยู่ในตู้เย็นนานแล้ว ควรรีบเอาไปทำอาหารนะ!"
+        : "มีวัตถุดิบที่อยู่ในตู้เย็นนานแล้ว ควรรีบใช้ ${oldItemNames.length} รายการ: "
+              "${oldItemNames.take(5).join(', ')}"
+              "${oldItemNames.length > 5 ? ' และอื่นๆ' : ''}";
 
     await init();
     await showExpiryAlert(message: message);
@@ -315,13 +294,6 @@ class NotificationService {
       // อัปเดตวันที่แจ้งเตือนล่าสุดไม่สำเร็จ (เช่นออฟไลน์) ไม่เป็นไร รอบหน้า
       // จะลองใหม่ — อย่างมากคือแจ้งเตือนซ้ำอีกครั้งถ้าเปิดแอปวันเดียวกัน
     }
-  }
-
-  static int _readNotifyDays(User user) {
-    final saved = user.userMetadata?['notify_days'];
-    if (saved is int) return saved;
-    if (saved != null) return int.tryParse(saved.toString()) ?? 3;
-    return 3;
   }
 }
 

@@ -209,31 +209,44 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
                   SizedBox(height: screenHeight * 0.025),
 
                   // ================= SUMMARY =================
-                  Container(
-                    height: screenHeight * 0.09,
-
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-
-                      borderRadius: BorderRadius.circular(25),
-                    ),
-
-                    child: Row(
-                      children: [
-                        stat(totalItems.toString(), "รายการ", Colors.green),
-
-                        divider(),
-
-                        stat(
-                          nearExpiryItems.toString(),
-                          "ใกล้หมดอายุ",
-                          Colors.orange,
+                  // กดแล้วไปหน้าคลัง (เช็คตู้เย็น) ที่มีป้ายวันหมดอายุบนการ์ดทุกใบ
+                  // จะได้ดูได้ว่าชิ้นไหนใกล้หมดอายุ/หมดแล้ว กลับมาแล้วรีเฟรชตัวเลข
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const InventoryScreen(),
                         ),
+                      ).then((_) => loadExpiryStatus());
+                    },
+                    child: Container(
+                      height: screenHeight * 0.09,
 
-                        divider(),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
 
-                        stat(expiredItems.toString(), "หมดแล้ว", Colors.red),
-                      ],
+                        borderRadius: BorderRadius.circular(25),
+                      ),
+
+                      child: Row(
+                        children: [
+                          stat(totalItems.toString(), "รายการ", Colors.green),
+
+                          divider(),
+
+                          stat(
+                            nearExpiryItems.toString(),
+                            "ใกล้หมดอายุ",
+                            Colors.orange,
+                          ),
+
+                          divider(),
+
+                          stat(expiredItems.toString(), "หมดแล้ว", Colors.red),
+                        ],
+                      ),
                     ),
                   ),
 
@@ -272,8 +285,8 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
 
                           [
                             Icons.notifications,
-                            "วันหมดอายุ",
-                            "แจ้งเตือนหมดอายุ",
+                            "แจ้งเตือน",
+                            "ของที่อยู่ในตู้เย็นนาน",
                           ],
 
                           [
@@ -314,32 +327,23 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
                             }
 
                             if (index == 1) {
+                              Navigator.push(
+                                context,
 
-  Navigator.push(
+                                MaterialPageRoute(
+                                  builder: (_) => const PlanMenuScreen(),
+                                ),
+                              );
+                            }
+                            if (index == 2) {
+                              Navigator.push(
+                                context,
 
-    context,
-
-    MaterialPageRoute(
-
-      builder: (_) => const PlanMenuScreen(),
-
-    ),
-
-  );
-
-}
-if (index == 2) {
-
-  Navigator.push(
-    context,
-
-    MaterialPageRoute(
-      builder: (_) => const ExpirationAlertScreen(),
-    ),
-
-  );
-
-}
+                                MaterialPageRoute(
+                                  builder: (_) => const ExpirationAlertScreen(),
+                                ),
+                              );
+                            }
 
                             if (index == 3) {
                               Navigator.push(

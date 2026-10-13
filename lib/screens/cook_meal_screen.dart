@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../services/fridge_stock.dart';
 import '../widgets/app_icons.dart';
 import '../widgets/recipe_flow_widgets.dart';
 
@@ -360,64 +361,37 @@ class _CookMealScreenState extends State<CookMealScreen> {
       return (deducted: 0, notFound: <String>[], errors: <String>[]);
     }
 
-    final fridgeItems = await supabase
-        .from('fridge_items')
-        .select()
-        .eq('user_id', user.id);
+    final fridgeItems = List<Map<String, dynamic>>.from(
+      await supabase.from('fridge_items').select().eq('user_id', user.id),
+    );
 
     int deducted = 0;
     List<String> notFound = [];
     List<String> errors = [];
 
+    // หักตามสัดส่วนแบบ FIFO: ลอตที่ใกล้หมดอายุ/เก่าที่สุดก่อน ถ้าลอตนั้นไม่พอ
+    // ก็หักลอตถัดไปต่อจนครบ (ดู fridge_stock.dart) วัตถุดิบชิ้นไหนอัปเดตไม่ผ่าน
+    // ชิ้นอื่นยังหักต่อได้ตามปกติ
     for (final ing in _ingredients) {
       final nameRaw = ing['name']?.toString() ?? '';
-      final name = nameRaw.trim().toLowerCase();
-      if (name.isEmpty) continue;
+      if (nameRaw.trim().isEmpty) continue;
 
       final useAmount = _parseQuantityAmount(ing['quantity']?.toString() ?? '');
       if (useAmount <= 0) continue;
 
-      final matches = fridgeItems.where((item) {
-        final itemName = (item['name']?.toString() ?? '').trim().toLowerCase();
-        return itemName.isNotEmpty &&
-            (itemName == name ||
-                itemName.contains(name) ||
-                name.contains(itemName));
-      }).toList();
+      final result = await deductIngredientFifo(
+        supabase: supabase,
+        inventory: fridgeItems,
+        name: nameRaw,
+        amount: useAmount,
+      );
 
-      if (matches.isEmpty) {
+      if (!result.found) {
         notFound.add(nameRaw);
-        continue;
-      }
-      final matched = matches.first;
-
-      final currentQty =
-          num.tryParse(matched['quantity']?.toString() ?? '') ?? 0;
-      // หักตามจำนวนจริงแบบมีทศนิยมได้เลย (เช่น 1/2 หัว ก็หัก 0.5 จริงๆ ไม่ปัด
-      // ขึ้นเป็น 1 หัวเต็ม) คอลัมน์ quantity ใน Supabase ต้องเป็นชนิด
-      // numeric/decimal ถึงจะรับค่าทศนิยมได้ (ดูหมายเหตุเดียวกันใน
-      // recipe_detail_screen.dart)
-      final newQty = (currentQty - useAmount) < 0 ? 0 : (currentQty - useAmount);
-
-      // แยก try/catch เฉพาะจุดอัปเดต ถ้าชิ้นนี้อัปเดตไม่ผ่าน (เช่นโดนบล็อก
-      // สิทธิ์จากฐานข้อมูล) วัตถุดิบชิ้นอื่นยังหักต่อได้ตามปกติ
-      try {
-        if (newQty <= 0) {
-          // ใช้วัตถุดิบชิ้นนี้หมดแล้ว ให้ลบออกจากคลังไปเลย แทนที่จะปล่อยให้
-          // ค้างเป็นแถวจำนวน 0 ชิ้น เพราะมันถูกใช้ไปแล้วจริงๆ
-          await supabase
-              .from('fridge_items')
-              .delete()
-              .eq('item_id', matched['item_id']);
-        } else {
-          await supabase
-              .from('fridge_items')
-              .update({'quantity': newQty})
-              .eq('item_id', matched['item_id']);
-        }
+      } else if (result.error != null) {
+        errors.add("$nameRaw: ${result.error}");
+      } else {
         deducted++;
-      } catch (e) {
-        errors.add("${matched['name'] ?? nameRaw}: $e");
       }
     }
 

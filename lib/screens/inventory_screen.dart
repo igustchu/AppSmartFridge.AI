@@ -4,6 +4,8 @@ import 'item_detail_screen.dart';
 import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
 import '../utils/category_icons.dart';
+import '../utils/fridge_age.dart';
+import '../utils/shelf_life.dart';
 import '../services/notification_service.dart';
 
 class InventoryScreen extends StatefulWidget {
@@ -47,8 +49,12 @@ class _InventoryScreenState extends State<InventoryScreen> {
             ascending: false,
           ); // เรียงตาม item_id ที่มีในฐานข้อมูล
 
+      // เรียงแบบ FIFO: ลอตที่ใกล้หมดอายุ/เก่าที่สุดขึ้นก่อนในแต่ละหมวดหมู่
+      final items = List<Map<String, dynamic>>.from(response)
+        ..sort(compareFifo);
+
       setState(() {
-        _inventoryItems = List<Map<String, dynamic>>.from(response);
+        _inventoryItems = items;
       });
 
       // ทุกครั้งที่โหลด/รีเฟรชคลัง ให้ซิงก์แจ้งเตือนวันหมดอายุใหม่ให้ตรงกับ
@@ -88,15 +94,64 @@ class _InventoryScreenState extends State<InventoryScreen> {
   // ต้องอ้างอิงตาม เพื่อไม่ให้ชุดอิโมจิหมวดหมู่เพี้ยนไปคนละหน้า)
   String _getCategoryIcon(String category) => categoryEmoji(category);
 
-  String _getSubtitle(Map<String, dynamic> item) {
-    if (item['expiry_date'] != null) {
-      DateTime expDate = DateTime.parse(item['expiry_date'].toString());
-      int diffDays = expDate.difference(DateTime.now()).inDays;
-      if (diffDays < 0) return 'หมดอายุแล้ว';
-      if (diffDays == 0) return 'หมดอายุวันนี้';
-      return 'หมดอายุในอีก $diffDays วัน';
+  num _toNum(dynamic v) =>
+      v is num ? v : num.tryParse(v?.toString() ?? '') ?? 0;
+
+  String _formatQty(num v) =>
+      v == v.roundToDouble() ? v.toInt().toString() : v.toStringAsFixed(1);
+
+  // ปรับลด/เพิ่มปริมาณคงเหลือเองแบบ Manual (Manual Override) ให้ตรงกับของจริง
+  // ถ้าลดจนเหลือ 0 จะถามก่อนว่าจะลบลอตนี้ออกจากตู้เย็นเลยไหม
+  Future<void> _adjustQuantity(Map<String, dynamic> item, num delta) async {
+    final id = item['item_id'].toString();
+    final current = _toNum(item['quantity']);
+    num next = current + delta;
+    if (next < 0) next = 0;
+
+    if (next <= 0) {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text("ใช้หมดแล้ว?"),
+          content: Text("ลบ ${item['name'] ?? 'วัตถุดิบ'} ออกจากตู้เย็นเลยไหม"),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("ยกเลิก"),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("ลบ", style: TextStyle(color: Colors.red)),
+            ),
+          ],
+        ),
+      );
+      if (confirm == true) await _deleteItem(id);
+      return;
     }
-    return 'จำนวน : ${item['quantity'] ?? 1} ${item['unit'] ?? ''}';
+
+    final maxQty = _toNum(item['max_quantity']);
+    final update = <String, dynamic>{'quantity': next};
+    // เพิ่มเกินปริมาณตั้งต้น ให้ขยายปริมาณตั้งต้นตามไปด้วย % จะได้ไม่เกิน 100
+    if (next > maxQty) update['max_quantity'] = next;
+
+    setState(() {
+      item['quantity'] = next;
+      if (update.containsKey('max_quantity')) item['max_quantity'] = next;
+    });
+
+    try {
+      await Supabase.instance.client
+          .from('fridge_items')
+          .update(update)
+          .eq('item_id', id);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text("ปรับจำนวนไม่สำเร็จ: $e")));
+      _fetchInventoryData();
+    }
   }
 
   @override
@@ -130,23 +185,17 @@ class _InventoryScreenState extends State<InventoryScreen> {
     int nearExpiryCount = 0;
     int expiredCount = 0;
 
+    // ของที่ใช้หมดแล้ว (เหลือ 0 ชิ้น) ไม่ควรถูกนับทั้ง "ใกล้หมดอายุ" และ
+    // "หมดแล้ว" เพราะไม่มีของเหลือให้ต้องพูดถึงวันหมดอายุอีกต่อไป (ปกติแล้ว
+    // พอเหลือ 0 ตอนทำอาหาร ระบบจะลบรายการนี้ออกจากคลังไปเลย)
     for (var item in (isCategoryView ? _inventoryItems : displayedItems)) {
-      final qty = item['quantity'];
-      final qtyNum = qty is num ? qty : num.tryParse(qty?.toString() ?? '');
-      final isUsedUp = qtyNum != null && qtyNum <= 0;
-
-      // ของที่ใช้หมดแล้ว (เหลือ 0 ชิ้น) ไม่ควรถูกนับทั้ง "ใกล้หมดอายุ" และ
-      // "หมดแล้ว" เพราะไม่มีของเหลือให้ต้องพูดถึงวันหมดอายุอีกต่อไป (ปกติแล้ว
-      // พอเหลือ 0 ตอนทำอาหาร ระบบจะลบรายการนี้ออกจากคลังไปเลย)
-      if (!isUsedUp && item['expiry_date'] != null) {
-        int diff = DateTime.parse(
-          item['expiry_date'].toString(),
-        ).difference(DateTime.now()).inDays;
-        if (diff < 0) {
-          expiredCount++;
-        } else if (diff <= 3) {
-          nearExpiryCount++;
-        }
+      if (isUsedUp(item)) continue;
+      final diff = daysUntilExpiry(item['expiry_date']);
+      if (diff == null) continue;
+      if (diff < 0) {
+        expiredCount++;
+      } else if (diff <= 3) {
+        nearExpiryCount++;
       }
     }
 
@@ -385,11 +434,50 @@ class _InventoryScreenState extends State<InventoryScreen> {
     );
   }
 
+  // ปริมาณที่ตรวจพบจากรูปตอนสแกน แสดงเฉพาะตอนที่ผู้ใช้เลือกแบ่งเป็นส่วน
+  // (หน่วยที่ใช้หักต่างจากที่ตรวจพบ) เช่น "ซื้อมา 1 แพ็ค แบ่งเป็น 3 ส่วน"
+  String? _detectedText(Map<String, dynamic> item) {
+    final detectedUnit = item['detected_unit']?.toString();
+    if (detectedUnit == null || detectedUnit == item['unit']?.toString()) {
+      return null;
+    }
+    final detectedQty = _formatQty(_toNum(item['detected_quantity']));
+    return "ซื้อมา $detectedQty $detectedUnit "
+        "แบ่งเป็น ${_formatQty(_toNum(item['max_quantity']))} ${item['unit'] ?? ''}";
+  }
+
+  Color _expiryBadgeColor(int days) {
+    if (days <= 1) return const Color(0xFFFADBD8);
+    if (days <= 3) return const Color(0xFFFFE0B2);
+    return const Color(0xFFDCF3DC);
+  }
+
+  Color _expiryTextColor(int days) {
+    if (days <= 1) return const Color(0xffD64545);
+    if (days <= 3) return const Color(0xffE67E22);
+    return const Color(0xff3F9142);
+  }
+
+  // การ์ดวัตถุดิบ 1 ลอต (ตามดีไซน์ในเอกสาร): ชื่อ, หมวดหมู่ + ช่องที่เก็บ,
+  // อยู่ในตู้เย็นมาแล้วกี่วัน, แถบปริมาณคงเหลือ "เหลือ 2 จาก 3 ส่วน (67%)",
+  // ป้ายวันหมดอายุ และปุ่ม -/+ ปรับปริมาณคงเหลือเอง
   Widget _buildItemCard(BuildContext context, Map<String, dynamic> item) {
     String id = item['item_id'].toString();
     String name = item['name'] ?? 'ไม่ระบุชื่อ';
-    String subtitle = _getSubtitle(item);
     String icon = _getCategoryIcon(item['category'] ?? '');
+    final category = item['category']?.toString() ?? 'อื่นๆ';
+    final storage = item['storage']?.toString();
+    final unit = item['unit']?.toString() ?? '';
+
+    final qty = _toNum(item['quantity']);
+    num maxQty = _toNum(item['max_quantity']);
+    if (maxQty < qty) maxQty = qty;
+    final ratio = maxQty > 0 ? (qty / maxQty).clamp(0.0, 1.0) : 0.0;
+    final percent = (ratio * 100).round();
+    const segments = 8;
+    final filled = (ratio * segments).round();
+
+    final expiryDays = daysUntilExpiry(item['expiry_date']);
 
     return GestureDetector(
       onTap: () {
@@ -398,83 +486,206 @@ class _InventoryScreenState extends State<InventoryScreen> {
           MaterialPageRoute(
             builder: (context) => ItemDetailScreen(itemData: item, itemId: id),
           ),
-        );
+        ).then((_) => _fetchInventoryData());
       },
       child: Container(
         margin: const EdgeInsets.only(bottom: 15),
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: const Color(0xFFFFF7D0),
           borderRadius: BorderRadius.circular(20),
         ),
         child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Container(
+              height: 56,
+              width: 56,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(icon, style: const TextStyle(fontSize: 30)),
+            ),
+            const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          name,
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.black87,
+                          ),
+                        ),
+                      ),
+                      if (expiryDays != null)
+                        Container(
+                          margin: const EdgeInsets.only(left: 6),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: _expiryBadgeColor(expiryDays),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            expiryText(expiryDays),
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: _expiryTextColor(expiryDays),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 2),
                   Text(
-                    name,
+                    storage == null
+                        ? category
+                        : "$category · ${storageEmoji(storage)} ${storageLabel(storage)}",
                     style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
                       color: Colors.black87,
                     ),
                   ),
-                  const SizedBox(height: 5),
-                  Text(
-                    subtitle,
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: subtitle.contains('หมดอายุ')
-                          ? Colors.red.shade700
-                          : Colors.black54,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Row(
-              children: [
-                Text(icon, style: const TextStyle(fontSize: 30)),
-                const SizedBox(width: 15),
-                GestureDetector(
-                  onTap: () {
-                    showDialog(
-                      context: context,
-                      builder: (context) => AlertDialog(
-                        title: const Text("ยืนยันการลบ"),
-                        content: Text("คุณต้องการลบ $name ใช่หรือไม่?"),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.pop(context),
-                            child: const Text("ยกเลิก"),
+                  if (item['created_at'] != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.schedule,
+                            size: 15,
+                            color: Color(0xff5189C9),
                           ),
-                          TextButton(
-                            onPressed: () {
-                              Navigator.pop(context);
-                              _deleteItem(id);
-                            },
-                            child: const Text(
-                              "ลบ",
-                              style: TextStyle(color: Colors.red),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              fridgeAgeText(item['created_at']),
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xff5189C9),
+                              ),
                             ),
                           ),
                         ],
                       ),
-                    );
-                  },
-                  child: const Icon(
-                    Icons.delete,
-                    color: Colors.black87,
-                    size: 28,
+                    ),
+                  if (_detectedText(item) != null)
+                    Text(
+                      _detectedText(item)!,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.black54,
+                      ),
+                    ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      for (int i = 0; i < segments; i++)
+                        Expanded(
+                          child: Container(
+                            height: 6,
+                            margin: EdgeInsets.only(
+                              right: i == segments - 1 ? 0 : 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: i < filled
+                                  ? const Color(0xff8BCB6A)
+                                  : Colors.black12,
+                              borderRadius: BorderRadius.circular(3),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
-                ),
-              ],
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          "เหลือ ${_formatQty(qty)} จาก ${_formatQty(maxQty)} $unit ($percent%)",
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: Colors.black87,
+                          ),
+                        ),
+                      ),
+                      _buildQtyButton(
+                        Icons.remove,
+                        () => _adjustQuantity(item, -1),
+                      ),
+                      const SizedBox(width: 6),
+                      _buildQtyButton(Icons.add, () => _adjustQuantity(item, 1)),
+                      const SizedBox(width: 6),
+                      GestureDetector(
+                        onTap: () {
+                          showDialog(
+                            context: context,
+                            builder: (context) => AlertDialog(
+                              title: const Text("ยืนยันการลบ"),
+                              content: Text("คุณต้องการลบ $name ใช่หรือไม่?"),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.pop(context),
+                                  child: const Text("ยกเลิก"),
+                                ),
+                                TextButton(
+                                  onPressed: () {
+                                    Navigator.pop(context);
+                                    _deleteItem(id);
+                                  },
+                                  child: const Text(
+                                    "ลบ",
+                                    style: TextStyle(color: Colors.red),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                        child: const Icon(
+                          Icons.delete,
+                          color: Colors.black87,
+                          size: 24,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildQtyButton(IconData icon, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        width: 30,
+        height: 30,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: const Color(0xFFFFD191)),
+        ),
+        child: Icon(icon, size: 18, color: Colors.black87),
       ),
     );
   }
