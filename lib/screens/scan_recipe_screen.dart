@@ -1,21 +1,17 @@
-import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:google_generative_ai/google_generative_ai.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../services/recipe_ai_service.dart';
+import '../widgets/add_recipe_widgets.dart';
 import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
 import '../widgets/recipe_flow_widgets.dart';
-import 'scan_recipe_result_screen.dart';
 import 'saved_recipes_screen.dart';
-import '../config/api_keys.dart';
+import 'scan_recipe_result_screen.dart';
 
-/// ทางลัด "สแกนสูตรอาหาร" จากเมนูหลัก (เมนูตะแกรงหน้าแรก)
-/// ผู้ใช้ขอให้เข้ามาแล้วเจอหน้าคลังสูตรอาหารที่บันทึกไว้แล้วเลย แทนที่จะพา
-/// เข้ากล้องสแกนทันที — ถ้าจะสแกนสูตรใหม่ ให้กดปุ่ม + ในหน้าคลังสูตรอาหารแทน
-/// (ตัวหน้ากล้องสแกนจริงๆ ย้ายไปอยู่ที่ ScanRecipeCaptureScreen ด้านล่าง)
+/// ทางลัด "สแกนสูตรอาหาร" จากเมนูหลัก -> เปิดหน้าคลังสูตรอาหารก่อน
+/// (สแกนสูตรใหม่ได้จากปุ่ม + ในหน้าคลังสูตร)
 class ScanRecipeScreen extends StatelessWidget {
   const ScanRecipeScreen({super.key});
 
@@ -23,10 +19,9 @@ class ScanRecipeScreen extends StatelessWidget {
   Widget build(BuildContext context) => const SavedRecipesScreen();
 }
 
-/// หน้าสแกนสูตรอาหาร (ตามดีไซน์ใน Figma: "Scan Smart Recipe")
-/// ถ่ายรูป/เลือกรูปสูตรอาหาร แล้วให้ Gemini แกะออกมาเป็นสูตร
-/// จากนั้นพาไปหน้าผลลัพธ์เพื่อตรวจสอบวัตถุดิบกับของจริงในตู้เย็นก่อนบันทึก
-/// (เข้าถึงได้จากปุ่ม + ในหน้าคลังสูตรอาหาร SavedRecipesScreen)
+/// หน้าสแกนสูตรอาหาร (ตามดีไซน์ใน Figma: "สแกนสูตรอาหาร")
+/// ถ่ายรูป/เลือกรูป -> Gemini อ่านสูตร -> หน้าผลลัพธ์ให้ตรวจสอบก่อนบันทึก
+/// pop(true) กลับไปหน้าคลังสูตรเมื่อบันทึกสำเร็จ
 class ScanRecipeCaptureScreen extends StatefulWidget {
   const ScanRecipeCaptureScreen({super.key});
 
@@ -37,7 +32,6 @@ class ScanRecipeCaptureScreen extends StatefulWidget {
 
 class _ScanRecipeCaptureScreenState extends State<ScanRecipeCaptureScreen> {
   final ImagePicker _picker = ImagePicker();
-  final String _apiKey = ApiKeys.scanRecipeScreen;
 
   List<Map<String, dynamic>> _recentRecipes = [];
   bool _isLoadingRecent = true;
@@ -48,7 +42,7 @@ class _ScanRecipeCaptureScreenState extends State<ScanRecipeCaptureScreen> {
     _fetchRecentRecipes();
   }
 
-  // ดึงสูตรอาหารที่สแกนไว้ล่าสุด 3 รายการจาก Supabase (ของจริง ไม่ใช่ mock)
+  // สูตรที่บันทึกล่าสุด 3 รายการจาก Supabase จริง
   Future<void> _fetchRecentRecipes() async {
     try {
       final user = Supabase.instance.client.auth.currentUser;
@@ -62,7 +56,6 @@ class _ScanRecipeCaptureScreenState extends State<ScanRecipeCaptureScreen> {
           .eq('user_id', user.id)
           .order('created_at', ascending: false)
           .limit(3);
-
       if (mounted) {
         setState(() {
           _recentRecipes = List<Map<String, dynamic>>.from(response);
@@ -70,98 +63,50 @@ class _ScanRecipeCaptureScreenState extends State<ScanRecipeCaptureScreen> {
         });
       }
     } catch (e) {
-      // แสดง error จริงออกมาแทนที่จะกลืนเงียบๆ เพื่อให้ตรวจจับปัญหา เช่น
-      // Row Level Security (RLS) บน Supabase บล็อกการอ่านได้ง่ายขึ้น
       debugPrint('โหลดสูตรอาหารล่าสุดไม่สำเร็จ: $e');
       if (mounted) setState(() => _isLoadingRecent = false);
     }
   }
 
   Future<void> _pickAndAnalyzeImage(ImageSource source) async {
-    if (!mounted) return;
+    VoidCallback? closeLoader;
     try {
-      // จำกัดความกว้าง/คุณภาพรูปก่อนส่งให้ AI เพื่อลดขนาดไฟล์
-      // (รูปจากกล้องความละเอียดสูงทำให้อัพโหลดช้าจนเกิน timeout ได้)
-      final XFile? image = await _picker.pickImage(
+      // ย่อรูปก่อนส่งให้ AI (รูปความละเอียดสูงอัปโหลดช้าจนเกิน timeout ได้)
+      final image = await _picker.pickImage(
         source: source,
         maxWidth: 1600,
         imageQuality: 85,
       );
-      if (image == null) return;
+      if (image == null || !mounted) return;
 
-      if (!mounted) return;
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) => const PopScope(
-          canPop: false,
-          child: Center(child: CircularProgressIndicator(color: Colors.blue)),
-        ),
+      closeLoader = showBlockingLoader(
+        context,
+        'AI กำลังอ่านสูตรอาหารจากรูป...',
       );
+      final bytes = await image.readAsBytes();
+      final recipe = await RecipeAiService.scanRecipeImage(
+        bytes,
+        mimeType: image.mimeType ?? 'image/jpeg',
+      );
+      closeLoader();
+      if (!mounted) return;
 
-      final model = GenerativeModel(model: 'gemini-3.6-flash', apiKey: _apiKey);
-      final imageBytes = await image.readAsBytes();
-
-      final prompt = TextPart("""
-        วิเคราะห์สูตรอาหารจากรูปภาพนี้ (อาจเป็นภาพถ่ายจากตำรา หนังสือ ใบสั่งอาหาร หรือลายมือ)
-        ตอบกลับมาเป็น JSON Object เท่านั้น ตามรูปแบบนี้เป๊ะๆ:
-        {
-          "recipe_name": "ชื่อเมนู",
-          "time": "เวลาทำ (เช่น 30 นาที)",
-          "servings": "จำนวนที่ได้ (เช่น 2 ที่)",
-          "ingredients_used": ["วัตถุดิบหลัก1", "วัตถุดิบหลัก2"],
-          "detailed_ingredients": [
-            {"name": "ชื่อวัตถุดิบภาษาไทย", "use_quantity": จำนวนเลข(ใส่แค่เลข), "unit": "หน่วย"}
-          ],
-          "instructions": [
-            "1. ขั้นตอนแรก...",
-            "2. ขั้นตอนต่อไป..."
-          ]
-        }
-        ห้ามมีข้อความอธิบายอื่น และ ห้ามมี Markdown ```json
-      """);
-
-      final response = await model
-          .generateContent([
-            Content.multi([prompt, DataPart('image/jpeg', imageBytes)]),
-          ])
-          .timeout(const Duration(seconds: 60));
-
-      if (mounted && Navigator.canPop(context)) Navigator.pop(context);
-
-      if (response.text != null) {
-        String cleanJson = response.text!
-            .replaceAll('```json', '')
-            .replaceAll('```', '')
-            .trim();
-
-        dynamic decoded = jsonDecode(cleanJson);
-        Map<String, dynamic> recipe = decoded is Map
-            ? Map<String, dynamic>.from(decoded)
-            : <String, dynamic>{};
-
-        if (mounted) {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => ScanRecipeResultScreen(recipe: recipe),
-            ),
-          ).then((_) {
-            // พอกลับมาจากหน้าผลลัพธ์ (บันทึกแล้วหรือยกเลิก) รีเฟรชรายการล่าสุด
-            _fetchRecentRecipes();
-          });
-        }
+      final saved = await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(builder: (_) => ScanRecipeResultScreen(recipe: recipe)),
+      );
+      if (!mounted) return;
+      if (saved == true) {
+        Navigator.pop(context, true); // กลับไปหน้าคลังสูตร
+      } else {
+        _fetchRecentRecipes();
       }
     } catch (e) {
-      if (mounted && Navigator.canPop(context)) Navigator.pop(context);
-      final isTimeout = e is TimeoutException;
+      closeLoader?.call();
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            isTimeout
-                ? "การวิเคราะห์รูปใช้เวลานานเกินไป กรุณาลองใหม่อีกครั้ง (เช็คสัญญาณอินเทอร์เน็ตด้วย)"
-                : "เกิดข้อผิดพลาด: $e",
-          ),
+          content: Text(RecipeAiService.friendlyError(e)),
           backgroundColor: Colors.red,
         ),
       );
@@ -171,133 +116,70 @@ class _ScanRecipeCaptureScreenState extends State<ScanRecipeCaptureScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFD8EEFF),
+      backgroundColor: kRecipeBg,
       bottomNavigationBar: const AppBottomNav(current: AppTab.scan),
       body: SafeArea(
         child: Column(
           children: [
-            RecipeFlowHeader(title: "สแกนสูตรอาหาร"),
+            RecipeFlowHeader(title: 'สแกนสูตรอาหาร'),
             const SizedBox(height: 15),
             Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 20.0),
-                child: Column(
-                  children: [
-                    _ScanOptionCard(
-                      icon: Icons.camera_alt_outlined,
-                      title: "ถ่ายรูปสูตรอาหาร",
-                      subtitle: "เปิดกล้องเพื่อสแกน",
-                      onTap: () => _pickAndAnalyzeImage(ImageSource.camera),
-                    ),
-                    const SizedBox(height: 15),
-                    _ScanOptionCard(
-                      icon: Icons.image_outlined,
-                      title: "เลือกจากคลังรูปภาพ",
-                      subtitle: "อัพโหลดรูปภาพที่มีอยู่",
-                      onTap: () => _pickAndAnalyzeImage(ImageSource.gallery),
-                    ),
-                    const SizedBox(height: 20),
-
-                    // เคล็ดลับการสแกน
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: const [
-                          BoxShadow(
-                            color: Colors.black12,
-                            blurRadius: 5,
-                            offset: Offset(0, 2),
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 30),
+                children: [
+                  _ScanOptionCard(
+                    icon: Icons.camera_alt_outlined,
+                    title: 'ถ่ายรูปสูตรอาหาร',
+                    subtitle: 'เปิดกล้องเพื่อสแกน',
+                    onTap: () => _pickAndAnalyzeImage(ImageSource.camera),
+                  ),
+                  const SizedBox(height: 14),
+                  _ScanOptionCard(
+                    icon: Icons.add_photo_alternate_outlined,
+                    title: 'เลือกจากคลังรูปภาพ',
+                    subtitle: 'อัพโหลดรูปภาพที่มีอยู่',
+                    onTap: () => _pickAndAnalyzeImage(ImageSource.gallery),
+                  ),
+                  const SizedBox(height: 20),
+                  RecipeSectionCard(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'เคล็ดลับการสแกน',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                            color: Colors.black87,
                           ),
-                        ],
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            "เคล็ดลับการสแกน",
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 16,
-                              color: Colors.black87,
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                          _buildTipItem("ถ่ายรูปในที่ที่มีแสงสว่างเพียงพอ"),
-                          _buildTipItem("จัดมุมมองให้อยู่ในแนวตรงและวางราบ"),
-                          _buildTipItem("เน้นความคมชัดและโฟกัสที่ตัวหนังสือ"),
-                          _buildTipItem("ครอบตัดเอาเฉพาะเนื้อหาที่สำคัญ"),
-                        ],
-                      ),
+                        ),
+                        const SizedBox(height: 10),
+                        _tip('ถ่ายรูปในที่ที่มีแสงสว่างเพียงพอ'),
+                        _tip('จัดมุมมองให้อยู่ในแนวตรงและวางราบ'),
+                        _tip('เน้นความคมชัดและโฟกัสที่ตัวหนังสือ'),
+                        _tip('ครอบตัดเอาเฉพาะเนื้อหาที่สำคัญ'),
+                      ],
                     ),
-
-                    const SizedBox(height: 20),
-
-                    // สูตรอาหารที่สแกนล่าสุด (ดึงจาก Supabase จริง)
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: const [
-                          BoxShadow(
-                            color: Colors.black12,
-                            blurRadius: 5,
-                            offset: Offset(0, 2),
+                  ),
+                  const SizedBox(height: 16),
+                  RecipeSectionCard(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'สูตรอาหารที่สแกนล่าสุด',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                            color: Colors.black87,
                           ),
-                        ],
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            "สูตรอาหารที่สแกนล่าสุด",
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 16,
-                              color: Colors.black87,
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                          _isLoadingRecent
-                              ? const Center(
-                                  child: Padding(
-                                    padding: EdgeInsets.all(10.0),
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  ),
-                                )
-                              : _recentRecipes.isEmpty
-                              ? const Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 10.0),
-                                  child: Text(
-                                    "ยังไม่มีประวัติการสแกนสูตรอาหาร",
-                                    style: TextStyle(
-                                      color: Colors.grey,
-                                      fontSize: 13,
-                                    ),
-                                  ),
-                                )
-                              : Column(
-                                  children: _recentRecipes.map((r) {
-                                    return _buildRecentItem(
-                                      r['recipe_name'] ?? 'ไม่มีชื่อเมนู',
-                                      relativeTimeThai(
-                                        r['created_at']?.toString(),
-                                      ),
-                                    );
-                                  }).toList(),
-                                ),
-                        ],
-                      ),
+                        ),
+                        const SizedBox(height: 6),
+                        _buildRecentList(),
+                      ],
                     ),
-                    const SizedBox(height: 30),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -306,42 +188,66 @@ class _ScanRecipeCaptureScreenState extends State<ScanRecipeCaptureScreen> {
     );
   }
 
-  Widget _buildTipItem(String text) {
+  Widget _buildRecentList() {
+    if (_isLoadingRecent) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(10),
+          child: CircularProgressIndicator(strokeWidth: 2, color: kRecipeBlue),
+        ),
+      );
+    }
+    if (_recentRecipes.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 10),
+        child: Text(
+          'ยังไม่มีประวัติการสแกนสูตรอาหาร',
+          style: TextStyle(color: Colors.grey, fontSize: 13),
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: _recentRecipes.map((r) {
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 0, 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                (r['recipe_name'] ?? 'ไม่มีชื่อเมนู').toString(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                  color: Colors.black87,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                relativeTimeThai(r['created_at']?.toString()),
+                style: const TextStyle(color: Colors.black54, fontSize: 12),
+              ),
+            ],
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _tip(String text) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8.0),
+      padding: const EdgeInsets.only(bottom: 6),
       child: Row(
         children: [
           const CheckIcon(size: 18),
           const SizedBox(width: 8),
-          Text(
-            text,
-            style: const TextStyle(color: Colors.black87, fontSize: 13),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildRecentItem(String title, String subtitle) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: const TextStyle(
-              fontWeight: FontWeight.bold,
-              color: Colors.black87,
-              fontSize: 15,
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(color: Colors.black87, fontSize: 13),
             ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(height: 2),
-          Text(
-            subtitle,
-            style: const TextStyle(color: Colors.black54, fontSize: 12),
           ),
         ],
       ),
@@ -349,6 +255,7 @@ class _ScanRecipeCaptureScreenState extends State<ScanRecipeCaptureScreen> {
   }
 }
 
+/// การ์ดตัวเลือกแบบกลาง (ไอคอนในวงกลมฟ้า + หัวข้อ + คำอธิบาย) ตาม Figma
 class _ScanOptionCard extends StatelessWidget {
   final IconData icon;
   final String title;
@@ -366,35 +273,25 @@ class _ScanOptionCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: Colors.white,
+      elevation: 1,
+      shadowColor: Colors.black26,
       borderRadius: BorderRadius.circular(24),
       child: InkWell(
         borderRadius: BorderRadius.circular(24),
-        splashColor: Colors.blue.withOpacity(0.15),
+        splashColor: kRecipeBlue.withOpacity(0.12),
         onTap: onTap,
-        child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 20),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(24),
-            boxShadow: const [
-              BoxShadow(
-                color: Colors.black12,
-                blurRadius: 5,
-                offset: Offset(0, 2),
-              ),
-            ],
-          ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 26, horizontal: 20),
           child: Column(
             children: [
               Container(
-                height: 70,
-                width: 70,
+                height: 64,
+                width: 64,
                 decoration: const BoxDecoration(
-                  color: Color(0xFFE3F2FD),
+                  color: kRecipeBg,
                   shape: BoxShape.circle,
                 ),
-                child: Icon(icon, size: 32, color: const Color(0xff5189C9)),
+                child: Icon(icon, size: 32, color: Colors.black87),
               ),
               const SizedBox(height: 14),
               Text(
@@ -402,7 +299,7 @@ class _ScanOptionCard extends StatelessWidget {
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                   fontWeight: FontWeight.bold,
-                  fontSize: 17,
+                  fontSize: 16,
                   color: Colors.black87,
                 ),
               ),

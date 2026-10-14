@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../services/fridge_stock.dart';
+import '../widgets/deduct_confirm_sheet.dart';
 import '../widgets/app_icons.dart';
 import '../widgets/recipe_flow_widgets.dart';
 
@@ -355,41 +356,35 @@ class _CookMealScreenState extends State<CookMealScreen> {
   // เพื่อให้ _markAsCooked() โชว์ผลลัพธ์ตรงกับที่เกิดขึ้นจริง แทนที่จะขึ้นว่า
   // "หักวัตถุดิบเรียบร้อยแล้ว" ทั้งที่จริงๆ อาจไม่ได้หักอะไรออกไปเลยสักชิ้น
   Future<({int deducted, List<String> notFound, List<String> errors})>
-      _deductFridgeIngredients() async {
-    final user = supabase.auth.currentUser;
-    if (user == null) {
-      return (deducted: 0, notFound: <String>[], errors: <String>[]);
-    }
-
-    final fridgeItems = List<Map<String, dynamic>>.from(
-      await supabase.from('fridge_items').select().eq('user_id', user.id),
-    );
-
+      _deductFridgeIngredients(
+    List<Map<String, dynamic>> fridgeItems,
+    List<DeductChoice> choices,
+  ) async {
     int deducted = 0;
     List<String> notFound = [];
     List<String> errors = [];
 
-    // หักตามสัดส่วนแบบ FIFO: ลอตที่ใกล้หมดอายุ/เก่าที่สุดก่อน ถ้าลอตนั้นไม่พอ
-    // ก็หักลอตถัดไปต่อจนครบ (ดู fridge_stock.dart) วัตถุดิบชิ้นไหนอัปเดตไม่ผ่าน
-    // ชิ้นอื่นยังหักต่อได้ตามปกติ
-    for (final ing in _ingredients) {
-      final nameRaw = ing['name']?.toString() ?? '';
-      if (nameRaw.trim().isEmpty) continue;
-
-      final useAmount = _parseQuantityAmount(ing['quantity']?.toString() ?? '');
-      if (useAmount <= 0) continue;
+    // หักตามปริมาณที่ผู้ใช้ยืนยันแบบ FIFO: ลอตที่ใกล้หมดอายุ/เก่าที่สุดก่อน
+    // ถ้าลอตนั้นไม่พอก็หักลอตถัดไปต่อจนครบ (ดู fridge_stock.dart) วัตถุดิบชิ้น
+    // ไหนอัปเดตไม่ผ่าน ชิ้นอื่นยังหักต่อได้ตามปกติ
+    for (final choice in choices) {
+      if (choice.amount == null) {
+        notFound.add(choice.name);
+        continue;
+      }
+      if (choice.amount! <= 0) continue; // ผู้ใช้เลือก "ไม่ได้ใช้"
 
       final result = await deductIngredientFifo(
         supabase: supabase,
         inventory: fridgeItems,
-        name: nameRaw,
-        amount: useAmount,
+        name: choice.name,
+        amount: choice.amount!,
       );
 
       if (!result.found) {
-        notFound.add(nameRaw);
+        notFound.add(choice.name);
       } else if (result.error != null) {
-        errors.add("$nameRaw: ${result.error}");
+        errors.add("${choice.name}: ${result.error}");
       } else {
         deducted++;
       }
@@ -399,10 +394,44 @@ class _CookMealScreenState extends State<CookMealScreen> {
   }
 
   Future<void> _markAsCooked() async {
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    // ให้ผู้ใช้ยืนยันก่อนว่าใช้ไปเท่าไหร่จริง (กดเลือกแบบกะด้วยตา ไม่ต้องชั่ง)
+    // ค่าเริ่มต้นตามที่แผนบอก — กดยกเลิกก็ไม่บันทึก/ไม่หักอะไรเลย
+    final List<Map<String, dynamic>> fridgeItems;
+    try {
+      fridgeItems = List<Map<String, dynamic>>.from(
+        await supabase.from('fridge_items').select().eq('user_id', user.id),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("โหลดวัตถุดิบไม่สำเร็จ: $e")),
+      );
+      return;
+    }
+    if (!mounted) return;
+
+    final choices = await showDeductConfirmSheet(
+      context,
+      inventory: fridgeItems,
+      requests: [
+        for (final ing in _ingredients)
+          if ((ing['name']?.toString() ?? '').trim().isNotEmpty)
+            DeductRequest(
+              name: ing['name'].toString(),
+              suggested:
+                  _parseQuantityAmount(ing['quantity']?.toString() ?? ''),
+            ),
+      ],
+    );
+    if (choices == null || !mounted) return;
+
     setState(() => saving = true);
 
     try {
-      final result = await _deductFridgeIngredients();
+      final result = await _deductFridgeIngredients(fridgeItems, choices);
 
       await supabase
           .from('weekly_meals')
@@ -418,7 +447,7 @@ class _CookMealScreenState extends State<CookMealScreen> {
         bgColor = Colors.red;
       } else if (result.deducted == 0) {
         message = result.notFound.isEmpty
-            ? "บันทึกว่าทำแล้ว แต่ไม่มีวัตถุดิบให้หัก"
+            ? "บันทึกว่าทำแล้ว ไม่ได้หักวัตถุดิบออกจากตู้เย็น"
             : "บันทึกว่าทำแล้ว แต่หาวัตถุดิบในคลังไม่เจอ: "
                 "${result.notFound.join(', ')}";
         bgColor = Colors.orange;

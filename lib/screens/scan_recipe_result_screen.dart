@@ -1,28 +1,39 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../services/recipe_repository.dart';
+import '../widgets/add_recipe_widgets.dart';
 import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
 import '../widgets/recipe_flow_widgets.dart';
-import 'saved_recipes_screen.dart';
+import 'manual_recipe_screen.dart';
 
-/// หน้าแสดงผลลัพธ์การสแกนสูตรอาหาร (ตามดีไซน์ใน Figma: "Result Smart Recipe")
-/// เทียบรายการวัตถุดิบที่สูตรต้องใช้กับของจริงในตู้เย็น (Supabase) แบบสด
-/// ก่อนให้ผู้ใช้กด "บันทึกสูตร" เข้าคลังสูตรอาหารของตัวเอง
+/// หน้าตรวจสอบสูตรที่ AI สแกน/สร้างมา (ตามดีไซน์ใน Figma: "สูตรเมนูอาหาร")
+/// - เทียบวัตถุดิบที่สูตรต้องใช้กับของจริงในตู้เย็น (Supabase) แบบสด
+/// - ปุ่ม "แก้ไข" เปิดฟอร์มที่กรอกข้อมูลจาก AI ไว้ให้แล้ว
+/// - แสดงคำเตือน AI ชัดเจนก่อนบันทึก
+///
+/// ผลลัพธ์ที่ pop กลับ: true = บันทึกแล้ว, false = กดสแกนใหม่/สร้างใหม่, null = ย้อนกลับ
 class ScanRecipeResultScreen extends StatefulWidget {
   final Map<String, dynamic> recipe;
+  final bool isAiGenerated;
+  final String retryLabel;
 
-  const ScanRecipeResultScreen({super.key, required this.recipe});
+  const ScanRecipeResultScreen({
+    super.key,
+    required this.recipe,
+    this.isAiGenerated = true,
+    this.retryLabel = 'สแกนใหม่',
+  });
 
   @override
-  State<ScanRecipeResultScreen> createState() =>
-      _ScanRecipeResultScreenState();
+  State<ScanRecipeResultScreen> createState() => _ScanRecipeResultScreenState();
 }
 
 class _ScanRecipeResultScreenState extends State<ScanRecipeResultScreen> {
+  late Map<String, dynamic> _recipe = Map<String, dynamic>.from(widget.recipe);
+  List<Map<String, dynamic>> _inventory = [];
   bool _isLoadingInventory = true;
   bool _isSaving = false;
-  List<Map<String, dynamic>> _inventory = [];
 
   @override
   void initState() {
@@ -30,410 +41,232 @@ class _ScanRecipeResultScreenState extends State<ScanRecipeResultScreen> {
     _fetchInventory();
   }
 
-  // ดึงวัตถุดิบจริงในตู้เย็นจาก Supabase มาใช้เทียบ (ห้ามใช้ตัวเลขจาก mock)
   Future<void> _fetchInventory() async {
     try {
-      final response = await Supabase.instance.client
-          .from('fridge_items')
-          .select();
-      if (mounted) {
-        setState(() {
-          _inventory = List<Map<String, dynamic>>.from(response);
-          _isLoadingInventory = false;
-        });
-      }
+      final inventory = await RecipeRepository.fetchInventory();
+      if (mounted) setState(() => _inventory = inventory);
     } catch (e) {
+      debugPrint('โหลดวัตถุดิบในตู้เย็นไม่สำเร็จ: $e');
+    } finally {
       if (mounted) setState(() => _isLoadingInventory = false);
     }
   }
 
-  num _toNum(dynamic v) {
-    if (v is num) return v;
-    return num.tryParse(v?.toString() ?? '') ?? 0;
-  }
-
-  // แสดง "ไม่ได้ระบุ" แทนที่จะปล่อยว่างเปล่า เมื่อ AI ไม่ได้ระบุปริมาณ/หน่วยของ
-  // วัตถุดิบชิ้นนั้นมาให้ (เช่น รูปสูตรต้นฉบับไม่ได้เขียนปริมาณกำกับไว้)
   String _formatQty(Map<String, dynamic> ing) {
-    final qty = ing['use_quantity'];
+    final qty = RecipeRepository.formatNum(ing['use_quantity']).trim();
     final unit = (ing['unit'] ?? '').toString().trim();
-    final qtyText = (qty == null || qty.toString().trim().isEmpty)
-        ? ''
-        : qty.toString().trim();
-    final combined = [qtyText, unit].where((s) => s.isNotEmpty).join(' ');
+    final combined = [qty, unit].where((s) => s.isNotEmpty).join(' ');
     return combined.isEmpty ? 'ไม่ได้ระบุ' : combined;
   }
 
-  // เช็คว่าวัตถุดิบที่สูตรต้องการ มีในตู้เย็นพอไหม (เทียบชื่อ + จำนวน)
-  bool _isIngredientAvailable(Map<String, dynamic> needed) {
-    final neededName = (needed['name'] ?? '').toString();
-    final neededQty = _toNum(needed['use_quantity']);
-    final match = _inventory
-        .where((inv) => (inv['name'] ?? '').toString() == neededName)
-        .toList();
-    if (match.isEmpty) return false;
-    // รวมทุกลอตของวัตถุดิบชื่อนี้ (ซื้อซ้ำจะแยกเป็นคนละลอตตามหลัก FIFO)
-    final haveQty = match.fold<num>(
-      0,
-      (sum, lot) => sum + _toNum(lot['quantity']),
+  Future<void> _editRecipe() async {
+    final edited = await Navigator.push<Map<String, dynamic>>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ManualRecipeScreen(
+          initialRecipe: _recipe,
+          returnOnly: true,
+          showAiDisclaimer: widget.isAiGenerated,
+        ),
+      ),
     );
-    return haveQty >= neededQty;
+    if (edited != null && mounted) setState(() => _recipe = edited);
   }
 
   Future<void> _saveRecipe() async {
     setState(() => _isSaving = true);
     try {
-      final user = Supabase.instance.client.auth.currentUser;
-      if (user == null) {
-        throw "ไม่พบผู้ใช้งาน กรุณาเข้าสู่ระบบใหม่";
-      }
-
-      final recipe = widget.recipe;
-      await Supabase.instance.client.from('scanned_recipes').insert({
-        'user_id': user.id,
-        'recipe_name': recipe['recipe_name'] ?? 'ไม่มีชื่อเมนู',
-        'time': recipe['time'],
-        'servings': recipe['servings'],
-        'ingredients_used': recipe['ingredients_used'] ?? [],
-        'detailed_ingredients': recipe['detailed_ingredients'] ?? [],
-        'instructions': recipe['instructions'] ?? [],
-      });
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("บันทึกสูตรอาหารเรียบร้อยแล้ว 📖"),
-            backgroundColor: Colors.green,
-          ),
-        );
-        Navigator.of(context).pushAndRemoveUntil(
-          MaterialPageRoute(builder: (_) => const SavedRecipesScreen()),
-          (route) => route.isFirst,
-        );
-      }
+      await RecipeRepository.saveRecipe(_recipe);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('บันทึกสูตรอาหารเรียบร้อยแล้ว 📖'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      Navigator.pop(context, true);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("บันทึกไม่สำเร็จ: $e"),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isSaving = false);
+      if (!mounted) return;
+      setState(() => _isSaving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('บันทึกไม่สำเร็จ: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final recipe = widget.recipe;
-    List<dynamic> instructions = recipe['instructions'] ?? [];
-    List<dynamic> detailedIngredients = recipe['detailed_ingredients'] ?? [];
-
-    final availableCount = detailedIngredients
-        .where((e) => _isIngredientAvailable(Map<String, dynamic>.from(e)))
-        .length;
+    final ingredients = RecipeRepository.ingredientsOf(_recipe);
+    final rawSteps = _recipe['instructions'];
+    final steps = rawSteps is List ? rawSteps : const [];
+    final availability = [
+      for (final ing in ingredients)
+        RecipeRepository.isIngredientAvailable(ing, _inventory),
+    ];
+    final availableCount = availability.where((a) => a).length;
+    final name = (_recipe['recipe_name'] ?? '').toString().trim();
 
     return Scaffold(
-      backgroundColor: const Color(0xFFD8EEFF),
+      backgroundColor: kRecipeBg,
       bottomNavigationBar: const AppBottomNav(current: AppTab.scan),
       body: SafeArea(
         child: Column(
           children: [
-            RecipeFlowHeader(title: "สูตรเมนูอาหาร"),
+            RecipeFlowHeader(title: 'สูตรเมนูอาหาร'),
             const SizedBox(height: 15),
             Expanded(
               child: _isLoadingInventory
                   ? const Center(
-                      child: CircularProgressIndicator(
-                        color: Color(0xff5189C9),
-                      ),
+                      child: CircularProgressIndicator(color: kRecipeBlue),
                     )
-                  : SingleChildScrollView(
-                      padding: const EdgeInsets.symmetric(horizontal: 20.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          // ชื่อเมนู (กล่องขาวตรงกลาง ตามดีไซน์)
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.symmetric(
-                              vertical: 14,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(16),
-                            ),
-                            alignment: Alignment.center,
-                            child: Text(
-                              recipe['recipe_name'] ?? 'ไม่มีชื่อเมนู',
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.black87,
-                              ),
+                  : ListView(
+                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                      children: [
+                        // ชื่อเมนู
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 12,
+                            horizontal: 16,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Text(
+                            name.isEmpty ? 'ไม่มีชื่อเมนู' : name,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.black87,
                             ),
                           ),
-                          const SizedBox(height: 20),
-
-                          // สถานะวัตถุดิบ (ของจริงจากฐานข้อมูล ไม่ใช่ mock)
-                          RecipeStatusBar(
-                            label: "สถานะวัตถุดิบ",
-                            have: availableCount,
-                            total: detailedIngredients.length,
-                          ),
-                          const SizedBox(height: 20),
-
-                          // วัตถุดิบที่ต้องใช้
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(20),
-                              boxShadow: const [
-                                BoxShadow(
-                                  color: Colors.black12,
-                                  blurRadius: 5,
-                                  offset: Offset(0, 2),
-                                ),
-                              ],
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 14,
-                                        vertical: 8,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFFFF7D0),
-                                        borderRadius:
-                                            BorderRadius.circular(20),
-                                      ),
-                                      child: const Text(
-                                        "วัตถุดิบที่ต้องใช้",
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 14,
-                                          color: Colors.black87,
-                                        ),
-                                      ),
-                                    ),
-                                    const EditPillButton(),
-                                  ],
-                                ),
-                                const SizedBox(height: 14),
-                                ...detailedIngredients.map((ing) {
-                                  final ingMap = Map<String, dynamic>.from(
-                                    ing,
-                                  );
-                                  final available = _isIngredientAvailable(
-                                    ingMap,
-                                  );
-                                  return Padding(
-                                    padding: const EdgeInsets.only(
-                                      bottom: 10.0,
-                                    ),
-                                    child: Row(
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.spaceBetween,
-                                      children: [
-                                        Row(
-                                          children: [
-                                            SizedBox(
-                                              width: 20,
-                                              child: available
-                                                  ? const CheckIcon(size: 18)
-                                                  : null,
-                                            ),
-                                            const SizedBox(width: 6),
-                                            Text(
-                                              ingMap['name'] ?? '',
-                                              style: const TextStyle(
-                                                fontSize: 15,
-                                                color: Colors.black87,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                        Text(
-                                          _formatQty(ingMap),
-                                          style: TextStyle(
-                                            color: Colors.grey.shade700,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                }),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 20),
-
-                          // ขั้นตอนการทำ
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(20),
-                              boxShadow: const [
-                                BoxShadow(
-                                  color: Colors.black12,
-                                  blurRadius: 5,
-                                  offset: Offset(0, 2),
-                                ),
-                              ],
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 14,
-                                        vertical: 8,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFFFF7D0),
-                                        borderRadius:
-                                            BorderRadius.circular(20),
-                                      ),
-                                      child: const Text(
-                                        "ขั้นตอนการทำ",
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 14,
-                                          color: Colors.black87,
-                                        ),
-                                      ),
-                                    ),
-                                    const EditPillButton(),
-                                  ],
-                                ),
-                                const SizedBox(height: 14),
-                                ...instructions.map((step) {
-                                  return Padding(
-                                    padding: const EdgeInsets.only(
-                                      bottom: 12.0,
-                                    ),
-                                    child: Text(
-                                      step.toString(),
-                                      style: const TextStyle(
-                                        fontSize: 15,
-                                        height: 1.5,
-                                        color: Colors.black87,
-                                      ),
-                                    ),
-                                  );
-                                }),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 20),
+                        ),
+                        if (widget.isAiGenerated) ...[
+                          const SizedBox(height: 12),
+                          const AiDisclaimerBanner(),
                         ],
-                      ),
+                        const SizedBox(height: 12),
+
+                        // สถานะวัตถุดิบ (ของจริงจากตู้เย็น)
+                        RecipeSectionCard(
+                          child: RecipeStatusBar(
+                            label: 'สถานะวัตถุดิบ',
+                            have: availableCount,
+                            total: ingredients.length,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+
+                        // วัตถุดิบที่ต้องใช้
+                        RecipeSectionCard(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _sectionHeader('วัตถุดิบที่ต้องใช้'),
+                              const SizedBox(height: 12),
+                              if (ingredients.isEmpty)
+                                _emptyHint('ไม่พบวัตถุดิบ กด "แก้ไข" เพื่อเพิ่ม'),
+                              for (var i = 0; i < ingredients.length; i++)
+                                _ingredientRow(
+                                  ingredients[i],
+                                  availability[i],
+                                ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+
+                        // ขั้นตอนการทำ
+                        RecipeSectionCard(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _sectionHeader('ขั้นตอนการทำ'),
+                              const SizedBox(height: 12),
+                              if (steps.isEmpty)
+                                _emptyHint('ไม่พบขั้นตอน กด "แก้ไข" เพื่อเพิ่ม'),
+                              for (final step in steps)
+                                Padding(
+                                  padding: const EdgeInsets.only(
+                                    left: 8,
+                                    bottom: 8,
+                                  ),
+                                  child: Text(
+                                    step.toString(),
+                                    style: const TextStyle(
+                                      fontSize: 14,
+                                      height: 1.5,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
             ),
-
-            // ปุ่มด้านล่าง: สแกนใหม่ / บันทึกสูตร
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black12,
-                    blurRadius: 10,
-                    offset: Offset(0, -3),
-                  ),
-                ],
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: SizedBox(
-                      height: 55,
-                      child: ElevatedButton(
-                        onPressed: _isSaving
-                            ? null
-                            : () => Navigator.pop(context),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.grey.shade400,
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(15),
-                          ),
-                        ),
-                        child: const Text(
-                          "สแกนใหม่",
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 15),
-                  Expanded(
-                    child: SizedBox(
-                      height: 55,
-                      child: ElevatedButton(
-                        onPressed: _isSaving ? null : _saveRecipe,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFE3F2FD),
-                          foregroundColor: const Color(0xff5189C9),
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(15),
-                          ),
-                        ),
-                        child: _isSaving
-                            ? const CircularProgressIndicator(
-                                color: Color(0xff5189C9),
-                              )
-                            : Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: const [
-                                  ColorFiltered(
-                                    colorFilter: ColorFilter.mode(
-                                      Color(0xff5189C9),
-                                      BlendMode.srcIn,
-                                    ),
-                                    child: CheckIcon(size: 18),
-                                  ),
-                                  SizedBox(width: 8),
-                                  Text(
-                                    "บันทึกสูตร",
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 16,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+            RecipeBottomActions(
+              secondaryLabel: widget.retryLabel,
+              onSecondary: () => Navigator.pop(context, false),
+              primaryLabel: 'บันทึกสูตร',
+              onPrimary: _saveRecipe,
+              isLoading: _isSaving,
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _sectionHeader(String title) {
+    return Row(
+      children: [
+        SectionPill(title),
+        const Spacer(),
+        EditPill(onTap: _editRecipe),
+      ],
+    );
+  }
+
+  Widget _emptyHint(String text) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+    child: Text(text, style: TextStyle(color: Colors.grey.shade600)),
+  );
+
+  /// แถววัตถุดิบในกรอบมุมโค้ง: ✓ (มีในตู้เย็นพอ) | ชื่อ | ปริมาณ
+  Widget _ingredientRow(Map<String, dynamic> ing, bool available) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.grey.shade300),
+      ),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 22,
+            child: available ? const CheckIcon(size: 16) : null,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              (ing['name'] ?? '').toString(),
+              style: const TextStyle(fontSize: 14, color: Colors.black87),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            _formatQty(ing),
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+          ),
+        ],
       ),
     );
   }

@@ -10,6 +10,7 @@ import 'package:google_generative_ai/google_generative_ai.dart';
 import 'dart:convert';
 import '../config/api_keys.dart';
 import '../services/fridge_stock.dart';
+import '../services/gemini_retry.dart';
 import '../utils/fridge_age.dart';
 
 
@@ -120,8 +121,11 @@ class _MealPlanScreenState
 
 
       // รวมลอตที่ชื่อ/หน่วยเดียวกันเป็นรายการเดียวก่อนส่งให้ Gemini
+      // ของที่เกินระยะที่เก็บได้แล้วไม่ส่งให้ AI เอาไปวางแผน (อาจไม่ปลอดภัย)
       final fridgeList = inventoryPromptList(
-        List<Map<String, dynamic>>.from(fridgeItems),
+        List<Map<String, dynamic>>.from(fridgeItems)
+            .where((e) => !isOverdue(e))
+            .toList(),
       );
 
 
@@ -145,13 +149,12 @@ class _MealPlanScreenState
       // หาวัตถุดิบที่อยู่ในตู้เย็นนานแล้ว (เอาไว้ให้ Gemini เลือกใช้ก่อน)
       // อิงรูปแบบเดียวกับ ai_recipe_screen.dart
       // ===============================
-      final oldItemDays = readOldItemDays(user);
       final expiringSoon = <Map<String, dynamic>>[];
 
       for (var item in fridgeItems) {
-        // เฉพาะของที่อยู่นานจนควรรีบใช้ (เกณฑ์ตามชนิดของ ดู isOldItem) และ
+        // เฉพาะของที่เก็บได้อีกไม่เกินจำนวนวันที่ตั้งแจ้งเตือนไว้ (นับเป็นวัน) และ
         // ยังไม่ได้ใช้หมด
-        if (!isOldItem(item, oldItemDays)) continue;
+        if (!shouldUseFirst(item, readOldItemDays(user))) continue;
 
         expiringSoon.add({
           'name': item['name'],
@@ -386,16 +389,6 @@ class _MealPlanScreenState
       List<dynamic> geminiMeals = [];
 
       if (remainingSlots.isNotEmpty) {
-      final model =
-      GenerativeModel(
-
-        model:
-        'gemini-3.6-flash',
-
-        apiKey:
-        apiKey,
-
-      );
 
 
 
@@ -475,6 +468,8 @@ ${usedNames.isEmpty ? "" : "ห้ามสร้างเมนูซ้ำก�
 - ให้ความสำคัญกับวัตถุดิบที่อยู่ในตู้เย็นมานานก่อนเป็นอันดับแรก
 - สามารถใช้วัตถุดิบเดิมซ้ำได้
 - ระบุ ingredients ของแต่ละมื้อ โดยเลือกจากวัตถุดิบที่มีเท่านั้น พร้อมปริมาณที่ใช้
+- ปริมาณที่ใช้ต้องเป็นหน่วยเดียวกับวัตถุดิบที่มี (เช่น ส่วน, ฟอง, ผล, หัว) ห้ามใช้กรัม/กก./มล./ช้อน
+  เพราะผู้ใช้ไม่ได้ชั่งตวง (1 ส่วน ≈ ใช้ทำอาหาร 1 ครั้ง ใช้ "1/2 ส่วน" ได้)
 - ระบุ steps เป็นขั้นตอนการทำอาหารแบบละเอียด เรียงเป็นข้อๆ (array ของ string ภาษาไทย)
 - ส่งออก JSON เท่านั้น
 
@@ -510,33 +505,12 @@ ${usedNames.isEmpty ? "" : "ห้ามสร้างเมนูซ้ำก�
 
 
 
-      // Gemini บางครั้งจะตอบ 503 "high demand" ชั่วคราว จึงลองใหม่อัตโนมัติ
-      // ก่อนค่อยแจ้ง error จริงให้ผู้ใช้เห็น
-      GenerateContentResponse? result;
-      Object? lastError;
-
-      for (var attempt = 0; attempt < 3; attempt++) {
-        try {
-          result = await model.generateContent([
-            Content.text(prompt),
-          ]);
-          break;
-        } catch (e) {
-          lastError = e;
-          final isOverloaded = e.toString().contains('503') ||
-              e.toString().contains('UNAVAILABLE');
-
-          if (!isOverloaded || attempt == 2) {
-            rethrow;
-          }
-
-          await Future.delayed(Duration(seconds: 2 * (attempt + 1)));
-        }
-      }
-
-      if (result == null) {
-        throw lastError ?? Exception('เรียก Gemini ไม่สำเร็จ');
-      }
+      // Gemini ตอบ 503 "high demand" ได้เป็นพักๆ ลองใหม่อัตโนมัติก่อนแจ้ง error
+      final result = await generateGemini(
+        apiKey: apiKey,
+        content: [Content.text(prompt)],
+        timeout: const Duration(seconds: 90),
+      );
 
 
 
@@ -736,7 +710,7 @@ ${usedNames.isEmpty ? "" : "ห้ามสร้างเมนูซ้ำก�
 
           Text(
 
-              "สร้างแผนไม่สำเร็จ: $e"
+              geminiErrorMessage(e, fallback: "สร้างแผนไม่สำเร็จ")
 
           ),
 

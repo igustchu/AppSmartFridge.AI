@@ -3,11 +3,17 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
+import '../widgets/overdue_notice.dart';
+import '../widgets/shelf_days_dialog.dart';
+import '../services/fridge_stock.dart';
+import '../utils/category_icons.dart';
 import '../utils/fridge_age.dart';
 import '../utils/shelf_life.dart';
 import 'notification_settings_screen.dart';
 
-/// หน้า "แจ้งเตือน" วัตถุดิบที่อยู่ในตู้เย็นนาน (ตามดีไซน์ใน Figma กลุ่ม "ALERT")
+/// หน้า "แจ้งเตือน" วัตถุดิบ (ตามดีไซน์ใน Figma กลุ่ม "ALERT") — กรองตามจำนวน
+/// วันที่อยู่ในตู้เย็น (0 / 1 / 3 / 7 / 14 วัน) และทุกการ์ดแสดงตัวเลขที่ใช้ตัดสิน (อยู่มาแล้วกี่วัน เทียบกับ
+/// เก็บได้กี่วัน) พร้อมที่มาของตัวเลข เพื่อให้ผู้ใช้เห็นเหตุผลเองและเชื่อถือได้
 /// เป็นหน้า root ของแท็บ "แจ้งเตือน" ในแถบเมนูด้านล่าง จึงไม่มีปุ่มย้อนกลับ
 class ExpirationAlertScreen extends StatefulWidget {
   const ExpirationAlertScreen({super.key});
@@ -19,19 +25,32 @@ class ExpirationAlertScreen extends StatefulWidget {
 class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
   final supabase = Supabase.instance.client;
 
-  // ตัวเลือก "อยู่ในตู้เย็นมาแล้วตั้งแต่กี่วันขึ้นไป" ใช้ 0 แทน "ทั้งหมด"
-  // และ -1 แทน "ควรรีบใช้" (เกณฑ์ตามชนิดของ ดู isOldItem ใน fridge_age.dart)
-  static const List<Map<String, Object>> dayOptions = [
-    {'label': 'ควรรีบใช้', 'value': -1},
-    {'label': 'ทั้งหมด', 'value': 0},
-    {'label': '3 วัน+', 'value': 3},
-    {'label': '7 วัน+', 'value': 7},
-    {'label': '14 วัน+', 'value': 14},
-  ];
-
-  int selectedDays = -1;
-  int oldItemDays = defaultOldItemDays;
   String selectedCategory = "ทั้งหมด";
+  int aheadDays = defaultOldItemDays;
+
+  // ตัวกรอง "อยู่ในตู้เย็นมาแล้ว" แบบช่วงที่ไม่ซ้อนกัน (ของแต่ละชิ้นอยู่ช่อง
+  // เดียว): value = วันเริ่ม, max = วันสุดท้าย (null = ไม่มีเพดาน)
+  // ยังไม่เลือกช่องไหน (null) = แสดงทั้งหมด กดช่องเดิมซ้ำเพื่อยกเลิกตัวกรอง
+  static const List<Map<String, int?>> dayOptions = [
+    {'value': 0, 'max': 0},
+    {'value': 1, 'max': 2},
+    {'value': 3, 'max': 6},
+    {'value': 7, 'max': 13},
+    {'value': 14, 'max': null},
+  ];
+  int? selectedDays;
+
+  Map<String, int?>? get _selectedOption => selectedDays == null
+      ? null
+      : dayOptions.firstWhere((o) => o['value'] == selectedDays);
+
+  String _rangeLabel(Map<String, int?> o) {
+    final min = o['value']!;
+    final max = o['max'];
+    if (max == null) return "$min วันขึ้นไป";
+    if (max == min) return "$min วัน";
+    return "$min–$max วัน";
+  }
 
   List<Map<String, dynamic>> items = [];
   bool loading = true;
@@ -54,35 +73,15 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
         .from('fridge_items')
         .select()
         .eq('user_id', user.id);
+    aheadDays = readOldItemDays(user);
 
-    oldItemDays = readOldItemDays(user);
-
-    final result = data.where((item) {
-      if (item['created_at'] == null) return false;
-
-      // ถ้าใช้วัตถุดิบชิ้นนี้หมดแล้ว (เช่น กดทำอาหารจนหักจำนวนเหลือ 0) ก็ไม่ต้อง
-      // เตือนอีกต่อไป เพราะไม่มีของเหลือให้ต้องรีบใช้แล้ว
-      if (isUsedUp(Map<String, dynamic>.from(item))) return false;
-
-      if (selectedDays == -1) {
-        return isOldItem(Map<String, dynamic>.from(item), oldItemDays);
-      }
-      return daysInFridge(item['created_at']) >= selectedDays;
-    }).map<Map<String, dynamic>>((e) {
-      return Map<String, dynamic>.from(e);
-    }).toList();
-
-    // เรียงตามของที่อยู่ในตู้เย็นนานที่สุดขึ้นก่อนเสมอ (ของที่ควรรีบใช้ที่สุด
-    // ต้องอยู่บนสุดจริงๆ ไม่ว่าจะอยู่หมวดไหน) ส่วนหมวดหมู่ใช้เป็นตัวตัดสินรอง
-    result.sort((a, b) {
-      final ageCompare = daysInFridge(b['created_at'])
-          .compareTo(daysInFridge(a['created_at']));
-      if (ageCompare != 0) return ageCompare;
-
-      final catA = a['category']?.toString() ?? "อื่นๆ";
-      final catB = b['category']?.toString() ?? "อื่นๆ";
-      return catA.compareTo(catB);
-    });
+    // ของที่ใช้หมดแล้ว (เหลือ 0) ไม่ต้องเตือนอีก เพราะไม่มีของเหลือให้รีบใช้
+    final result = data
+        .map<Map<String, dynamic>>((e) => Map<String, dynamic>.from(e))
+        .where((item) => item['created_at'] != null && !isUsedUp(item))
+        .toList()
+      // เหลือวันน้อยที่สุดขึ้นก่อน ตรงกับ "เหลืออีก X วัน" บนหลอดนับของการ์ด
+      ..sort(compareDaysLeft);
 
     if (mounted) {
       setState(() {
@@ -92,73 +91,49 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
     }
   }
 
-  void changeDays(int day) {
-    setState(() {
-      selectedDays = day;
-      loading = true;
-    });
-
-    loadItems();
-  }
-
   List<String> categories() {
-    final list = items
+    final list = statusItems()
         .map((item) => item['category']?.toString() ?? "อื่นๆ")
         .toSet()
         .toList();
-
     list.sort();
-
     return ["ทั้งหมด", ...list];
   }
 
-  List<Map<String, dynamic>> filteredItems() {
-    if (selectedCategory == "ทั้งหมด") {
-      return items;
-    }
-
-    return items.where((item) {
-      return (item['category']?.toString() ?? "อื่นๆ") == selectedCategory;
+  // รายการตามตัวกรองจำนวนวัน (ใช้คำนวณหมวดหมู่ที่มีให้เลือกด้วย)
+  List<Map<String, dynamic>> statusItems() {
+    final option = _selectedOption;
+    if (option == null) return items;
+    return items.where((i) {
+      final days = daysInFridge(i['created_at']);
+      final max = option['max'];
+      return days >= option['value']! && (max == null || days <= max);
     }).toList();
   }
 
-  String categoryEmoji(String category) {
-    if (category.contains("ผลไม้")) return "🍎";
-    if (category.contains("ผัก")) return "🥕";
-    if (category.contains("เนื้อ") ||
-        category.contains("หมู") ||
-        category.contains("ไก่") ||
-        category.contains("ปลา")) {
-      return "🥩";
-    }
-    if (category.contains("ข้าว") || category.contains("แป้ง")) return "🍞";
-    if (category.contains("นม") || category.contains("เครื่องดื่ม")) {
-      return "🥛";
-    }
-    if (category.contains("ขนม")) return "🍬";
-
-    return "📦";
+  List<Map<String, dynamic>> filteredItems() {
+    final list = statusItems();
+    if (selectedCategory == "ทั้งหมด") return list;
+    return list
+        .where(
+          (item) =>
+              (item['category']?.toString() ?? "อื่นๆ") == selectedCategory,
+        )
+        .toList();
   }
 
-  String formatDate(String date) {
-    final d = DateTime.parse(date).toLocal();
-    return "${d.day}/${d.month}/${d.year + 543}";
+  String _fmtDays(num days) {
+    if (days >= 60 && days % 30 == 0) return "${days ~/ 30} เดือน";
+    return "${days == days.roundToDouble() ? days.toInt() : days.toStringAsFixed(1)} วัน";
   }
 
-  // สีการ์ด: ของที่ควรรีบใช้แล้ว (ตามชนิดของ) = แดงเสมอ นอกนั้นไล่ตามระยะเวลา
-  // ที่อยู่ในตู้เย็น: 7 วันขึ้นไป = เหลือง, 3 วันขึ้นไป = เขียว, น้อยกว่า = ขาว
-  Color cardColor(int days, bool old) {
-    if (old || days >= 14) return const Color(0xFFFADBD8);
-    if (days >= 7) return const Color(0xFFFFF7D0);
-    if (days >= 3) return const Color(0xFFDCF3DC);
-    return Colors.white;
-  }
-
-  Color statusColor(int days, bool old) {
-    if (old || days >= 14) return const Color(0xffD64545);
-    if (days >= 7) return const Color(0xffC9A227);
-    if (days >= 3) return const Color(0xff3F9142);
-    return Colors.grey.shade600;
+  // สีหลอดนับ (นับเป็นวัน): ครบกำหนด/เกินแล้ว = แดง, เหลือไม่เกินจำนวนวันที่
+  // ตั้งแจ้งเตือนไว้ = ส้ม, นอกนั้น = เขียว
+  Color _daysLeftColor(int? left) {
+    if (left == null) return Colors.grey;
+    if (left <= 0) return const Color(0xffD64545);
+    if (left <= aheadDays) return const Color(0xffE67E22);
+    return const Color(0xff3F9142);
   }
 
   @override
@@ -173,12 +148,15 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
             const SizedBox(height: 12),
             buildSettingsButton(context),
             const SizedBox(height: 15),
-            buildDaySelector(),
+            buildStatusSelector(),
             const SizedBox(height: 15),
             Expanded(
               child: loading
                   ? const Center(child: CircularProgressIndicator())
-                  : buildContent(),
+                  : RefreshIndicator(
+                      onRefresh: loadItems,
+                      child: buildContent(),
+                    ),
             ),
           ],
         ),
@@ -274,7 +252,7 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
     );
   }
 
-  Widget buildDaySelector() {
+  Widget buildStatusSelector() {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 20),
       padding: const EdgeInsets.all(18),
@@ -294,8 +272,7 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          // ให้ชิปทั้ง 5 อันขยายเท่าๆ กันจนเต็มความกว้างการ์ดพอดี แทนที่จะ
-          // ปล่อยให้กองชิดซ้ายแล้วเหลือพื้นที่ว่างด้านขวาแบบเดิม
+          // ให้ชิปทั้ง 5 อันขยายเท่าๆ กันจนเต็มความกว้างการ์ดพอดี
           Row(
             children: [
               for (int i = 0; i < dayOptions.length; i++) ...[
@@ -309,12 +286,14 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
     );
   }
 
-  Widget _buildDayChip(Map<String, Object> opt) {
-    final value = opt['value'] as int;
+  Widget _buildDayChip(Map<String, int?> opt) {
+    final value = opt['value']!;
     final selected = selectedDays == value;
-
     return GestureDetector(
-      onTap: () => changeDays(value),
+      onTap: () => setState(() {
+        selectedDays = selected ? null : value;
+        selectedCategory = "ทั้งหมด";
+      }),
       child: Container(
         alignment: Alignment.center,
         padding: const EdgeInsets.symmetric(vertical: 9),
@@ -324,7 +303,7 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
           border: selected ? null : Border.all(color: Colors.black12),
         ),
         child: Text(
-          opt['label'] as String,
+          "$value วัน",
           textAlign: TextAlign.center,
           style: const TextStyle(
             fontWeight: FontWeight.bold,
@@ -338,6 +317,8 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
 
   Widget buildContent() {
     final showItems = filteredItems();
+    final option = _selectedOption;
+    final label = option == null ? "ทั้งหมด" : "อยู่มา ${_rangeLabel(option)}";
 
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -370,18 +351,15 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      "อยู่ในตู้เย็น",
+                      label,
                       style: const TextStyle(
                         fontWeight: FontWeight.bold,
                         fontSize: 16,
+                        color: Colors.black87,
                       ),
                     ),
                     Text(
-                      selectedDays == -1
-                          ? "${showItems.length} รายการ ควรรีบใช้"
-                          : selectedDays == 0
-                          ? "${showItems.length} รายการทั้งหมด"
-                          : "${showItems.length} รายการ อยู่มา $selectedDays วันขึ้นไป",
+                      "${showItems.length} รายการ",
                       style: const TextStyle(color: Colors.grey),
                     ),
                   ],
@@ -413,7 +391,6 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
           runSpacing: 10,
           children: categories().map((cat) {
             final selected = selectedCategory == cat;
-
             return GestureDetector(
               onTap: () => setState(() => selectedCategory = cat),
               child: Container(
@@ -427,7 +404,7 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
                   border: selected ? null : Border.all(color: Colors.black12),
                 ),
                 child: Text(
-                  "${categoryEmoji(cat)} $cat",
+                  cat == "ทั้งหมด" ? "📦 ทั้งหมด" : "${categoryEmoji(cat)} $cat",
                   style: const TextStyle(
                     fontWeight: FontWeight.bold,
                     color: Colors.black87,
@@ -451,81 +428,186 @@ class _ExpirationAlertScreenState extends State<ExpirationAlertScreen> {
             ),
           ),
 
-        ...showItems.map((item) {
-          final days = daysInFridge(item['created_at']);
-          final old = isOldItem(item, oldItemDays);
-
-          return Container(
-            margin: const EdgeInsets.only(bottom: 15),
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              color: cardColor(days, old),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Text(
-                      categoryEmoji(item['category'] ?? ""),
-                      style: const TextStyle(fontSize: 32),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        item['name'] ?? "ไม่ระบุ",
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 17,
-                        ),
-                      ),
-                    ),
-                    InkWell(
-                      borderRadius: BorderRadius.circular(20),
-                      onTap: () => deleteItem(item),
-                      child: const Padding(
-                        padding: EdgeInsets.all(4),
-                        child: Icon(
-                          Icons.delete_outline,
-                          color: Colors.black87,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Text("📥 เพิ่มเข้าตู้เย็น: ${formatDate(item['created_at'])}"),
-                if (item['storage'] != null)
-                  Text(
-                    "${storageEmoji(item['storage'])} เก็บใน${storageLabel(item['storage'])}",
-                  ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Icon(
-                      Icons.info_outline,
-                      size: 15,
-                      color: statusColor(days, old),
-                    ),
-                    const SizedBox(width: 5),
-                    Text(
-                      old
-                          ? "${fridgeAgeText(item['created_at'])} · ควรรีบใช้"
-                          : fridgeAgeText(item['created_at']),
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: statusColor(days, old),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          );
-        }),
+        ...showItems.map(_buildItemCard),
+        const SizedBox(height: 20),
       ],
     );
+  }
+
+  // การ์ดวัตถุดิบ: ไม่มีป้ายความสด แสดงเป็นหลอดนับ (อยู่มาแล้ว · เก็บได้)
+  // ข้อความนับเป็นวัน (เก็บได้อีก X วัน / ครบกำหนดวันนี้ / เกินมาแล้ว X วัน)
+  // พร้อมที่มาของตัวเลข และปุ่มแก้ระยะที่เก็บได้
+  Widget _buildItemCard(Map<String, dynamic> item) {
+    final left = daysLeft(item);
+    final color = _daysLeftColor(left);
+    final shelf = shelfDaysOf(item);
+    // หลอดคิดจากตัวเลขเดียวกับข้อความ "เก็บได้อีก X วัน" (วันหมดอายุตามวันใน
+    // ปฏิทิน) ผ่านไปแล้ว = เก็บได้ − เก็บได้อีก ทั้งสองอย่างจะขยับไปพร้อมกัน
+    final ratio = (shelf == null || left == null)
+        ? null
+        : ((shelf - left) / shelf).clamp(0.0, 1.0).toDouble();
+    final storage = item['storage']?.toString();
+    final state = item['food_state']?.toString() ?? '';
+    final category = item['category']?.toString() ?? "อื่นๆ";
+
+    String remainingText() => left == null ? "" : daysLeftText(left);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.fromLTRB(16, 14, 8, 14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(categoryEmoji(category), style: const TextStyle(fontSize: 28)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  item['name'] ?? "ไม่ระบุ",
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 17,
+                  ),
+                ),
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.delete_outline, color: Colors.black54),
+                onPressed: () => deleteItem(item),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            shelf == null
+                ? fridgeAgeText(item['created_at'])
+                : "${fridgeAgeShort(item['created_at'])} · "
+                      "เก็บได้ ${_fmtDays(shelf)}",
+            style: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: Colors.black87,
+            ),
+          ),
+          if (ratio != null) ...[
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: ratio,
+                        minHeight: 8,
+                        backgroundColor: Colors.black12,
+                        color: color,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    remainingText(),
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: color,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          // เกินระยะที่เก็บได้แล้ว: บอกคำแนะนำตามชนิดของ (ทิ้ง / ตรวจก่อนใช้)
+          if (left != null && left < 0) ...[
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: OverdueNotice(
+                item: item,
+                onExtend: (days) => _extend(item, days),
+              ),
+            ),
+          ],
+          const SizedBox(height: 6),
+          Text(
+            [
+              if (state.isNotEmpty) state,
+              "${storageEmoji(storage)} ${storageLabel(storage)}",
+              "เข้าตู้เย็น ${formatDate(item['created_at'].toString())} "
+                  "${addedTimeText(item['created_at'])}",
+            ].join(" · "),
+            style: const TextStyle(fontSize: 12, color: Colors.black54),
+          ),
+          // ที่มาของ "เก็บได้กี่วัน" แสดงบนการ์ดเลย พร้อมปุ่มแก้เองได้
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  shelfSourceShort(item),
+                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+              ),
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                ),
+                onPressed: () => _editShelfDays(item),
+                icon: const Icon(
+                  Icons.edit_outlined,
+                  size: 16,
+                  color: Color(0xff5189C9),
+                ),
+                label: const Text(
+                  "แก้",
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Color(0xff5189C9),
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ผู้ใช้ตรวจแล้วว่ายังใช้ได้ ต่อเวลาให้ "เก็บได้อีก X วัน" (ดู extendShelfLife)
+  Future<void> _extend(Map<String, dynamic> item, int days) async {
+    try {
+      await extendShelfLife(supabase: supabase, item: item, moreDays: days);
+      await loadItems();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("${item['name'] ?? 'วัตถุดิบ'} เก็บได้อีก $days วัน")),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text("บันทึกไม่สำเร็จ: $e")));
+    }
+  }
+
+  // created_at จาก Supabase เป็นเวลา UTC ที่ไม่มีตัวบอก timezone ต้องแปลงผ่าน
+  // parseCreatedAt ก่อน ไม่งั้นวันที่จะเพี้ยนไป 7 ชั่วโมง
+  String formatDate(String date) {
+    final d = parseCreatedAt(date) ?? DateTime.parse(date);
+    return "${d.day}/${d.month}/${d.year + 543}";
+  }
+
+  // แก้ระยะที่เก็บได้ (หน้าต่างกลาง ใช้ร่วมกับหน้าคลัง)
+  Future<void> _editShelfDays(Map<String, dynamic> item) async {
+    if (await editShelfDaysDialog(context, item)) await loadItems();
   }
 
   Future<void> deleteItem(Map<String, dynamic> item) async {

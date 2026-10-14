@@ -6,6 +6,9 @@ import '../widgets/app_icons.dart';
 import '../utils/category_icons.dart';
 import '../utils/fridge_age.dart';
 import '../utils/shelf_life.dart';
+import '../widgets/overdue_notice.dart';
+import '../widgets/shelf_days_dialog.dart';
+import '../services/fridge_stock.dart';
 import '../services/notification_service.dart';
 
 class InventoryScreen extends StatefulWidget {
@@ -130,15 +133,26 @@ class _InventoryScreenState extends State<InventoryScreen> {
       return;
     }
 
+    // ปุ่ม + ใช้คืนจำนวนที่กดลดไป (เช่นกดลบผิด) ได้ไม่เกินปริมาณทั้งหมดตอนเก็บ
+    // ไม่ไปเพิ่ม "ทั้งหมด" ให้เอง — ถ้าซื้อมาเพิ่มจริงควรสแกนเป็นลอตใหม่ ส่วน
+    // ถ้าจำนวนตั้งต้นผิด ให้แก้ "ทั้งหมด" ในหน้ารายละเอียด
     final maxQty = _toNum(item['max_quantity']);
-    final update = <String, dynamic>{'quantity': next};
-    // เพิ่มเกินปริมาณตั้งต้น ให้ขยายปริมาณตั้งต้นตามไปด้วย % จะได้ไม่เกิน 100
-    if (next > maxQty) update['max_quantity'] = next;
+    if (maxQty > 0 && next > maxQty) {
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            "${item['name'] ?? 'วัตถุดิบ'} มีครบ ${_formatQty(maxQty)} "
+            "${item['unit'] ?? ''} แล้ว — ถ้าซื้อมาเพิ่มให้สแกนเป็นลอตใหม่ "
+            "หรือแก้จำนวนทั้งหมดในหน้ารายละเอียด",
+          ),
+        ),
+      );
+      return;
+    }
 
-    setState(() {
-      item['quantity'] = next;
-      if (update.containsKey('max_quantity')) item['max_quantity'] = next;
-    });
+    final update = <String, dynamic>{'quantity': next};
+    setState(() => item['quantity'] = next);
 
     try {
       await Supabase.instance.client
@@ -151,7 +165,25 @@ class _InventoryScreenState extends State<InventoryScreen> {
         context,
       ).showSnackBar(SnackBar(content: Text("ปรับจำนวนไม่สำเร็จ: $e")));
       _fetchInventoryData();
+      return;
     }
+
+    // กดผิดก็กด "เลิกทำ" คืนค่าเดิมได้ทันที
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          "${item['name'] ?? 'วัตถุดิบ'} เหลือ ${_formatQty(next)} "
+          "${item['unit'] ?? ''}",
+        ),
+        duration: const Duration(seconds: 4),
+        action: SnackBarAction(
+          label: "เลิกทำ",
+          onPressed: () => _adjustQuantity(item, current - next),
+        ),
+      ),
+    );
   }
 
   @override
@@ -190,7 +222,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
     // พอเหลือ 0 ตอนทำอาหาร ระบบจะลบรายการนี้ออกจากคลังไปเลย)
     for (var item in (isCategoryView ? _inventoryItems : displayedItems)) {
       if (isUsedUp(item)) continue;
-      final diff = daysUntilExpiry(item['expiry_date']);
+      final diff = daysLeft(item);
       if (diff == null) continue;
       if (diff < 0) {
         expiredCount++;
@@ -304,12 +336,12 @@ class _InventoryScreenState extends State<InventoryScreen> {
                           color: Colors.grey,
                           thickness: 0.5,
                         ),
-                        _buildStatColumn("$nearExpiryCount", "ใกล้หมดอายุ"),
+                        _buildStatColumn("$nearExpiryCount", "ใกล้ครบกำหนด"),
                         const VerticalDivider(
                           color: Colors.grey,
                           thickness: 0.5,
                         ),
-                        _buildStatColumn("$expiredCount", "หมดแล้ว"),
+                        _buildStatColumn("$expiredCount", "เกินกำหนด"),
                       ],
                     ),
                   ),
@@ -446,6 +478,27 @@ class _InventoryScreenState extends State<InventoryScreen> {
         "แบ่งเป็น ${_formatQty(_toNum(item['max_quantity']))} ${item['unit'] ?? ''}";
   }
 
+  // ผู้ใช้ตรวจแล้วว่ายังใช้ได้ ต่อเวลาให้ "เก็บได้อีก X วัน" (ดู extendShelfLife)
+  Future<void> _extend(Map<String, dynamic> item, int days) async {
+    try {
+      await extendShelfLife(
+        supabase: Supabase.instance.client,
+        item: item,
+        moreDays: days,
+      );
+      await _fetchInventoryData();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("${item['name'] ?? 'วัตถุดิบ'} เก็บได้อีก $days วัน")),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text("บันทึกไม่สำเร็จ: $e")));
+    }
+  }
+
   Color _expiryBadgeColor(int days) {
     if (days <= 1) return const Color(0xFFFADBD8);
     if (days <= 3) return const Color(0xFFFFE0B2);
@@ -477,7 +530,7 @@ class _InventoryScreenState extends State<InventoryScreen> {
     const segments = 8;
     final filled = (ratio * segments).round();
 
-    final expiryDays = daysUntilExpiry(item['expiry_date']);
+    final expiryDays = daysLeft(item);
 
     return GestureDetector(
       onTap: () {
@@ -582,6 +635,55 @@ class _InventoryScreenState extends State<InventoryScreen> {
                           ),
                         ],
                       ),
+                    ),
+                  // เกินระยะที่เก็บได้แล้ว: คำแนะนำตามชนิดของ และปุ่ม "ตรวจแล้วยังใช้ได้"
+                  if (expiryDays != null && expiryDays < 0)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6, bottom: 2),
+                      child: OverdueNotice(
+                        item: item,
+                        onExtend: (days) => _extend(item, days),
+                      ),
+                    ),
+                  // ที่มาของระยะที่เก็บได้ + ปุ่มแก้ (เช่นกด +วันผิด จะได้แก้กลับได้)
+                  if (shelfDaysOf(item) != null)
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            "เก็บได้ ${formatShelfDays(shelfDaysOf(item)!.round())} · "
+                            "${shelfSourceShort(item)}",
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Colors.black54,
+                            ),
+                          ),
+                        ),
+                        TextButton.icon(
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(horizontal: 6),
+                          ),
+                          onPressed: () async {
+                            if (await editShelfDaysDialog(context, item)) {
+                              _fetchInventoryData();
+                            }
+                          },
+                          icon: const Icon(
+                            Icons.edit_outlined,
+                            size: 15,
+                            color: Color(0xff5189C9),
+                          ),
+                          label: const Text(
+                            "แก้",
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Color(0xff5189C9),
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   if (_detectedText(item) != null)
                     Text(

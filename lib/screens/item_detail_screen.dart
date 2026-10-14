@@ -158,6 +158,148 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
     );
   }
 
+  String _fmtQty(dynamic v) {
+    final n = v is num ? v : num.tryParse(v?.toString() ?? '') ?? 0;
+    return n == n.roundToDouble() ? n.toInt().toString() : n.toStringAsFixed(1);
+  }
+
+  // --- 🚀 Popup แก้จำนวน: แก้ได้ทั้ง "เหลืออยู่" และ "ทั้งหมด" (ปริมาณตอนเก็บ
+  // เข้าตู้เย็น) — ใช้แก้ตอนใส่จำนวนตั้งต้นผิด หรือกดปุ่มในหน้าคลังผิด ---
+  Future<void> _showQuantityDialog() async {
+    final currentUnit = _item!['unit']?.toString() ?? 'ชิ้น';
+    // วิธีนับ: "แบ่งเป็นส่วน" (หน่วย ส่วน) หรือ "นับเป็นชิ้น" (ฟอง/ผล/หัว ฯลฯ)
+    // เปลี่ยนไปมาได้ จำหน่วยนับชิ้นล่าสุดไว้ สลับกลับมาจะได้หน่วยเดิม
+    bool isPortion = currentUnit == portionUnit;
+    String pieceUnit = isPortion ? 'ชิ้น' : currentUnit;
+    // หน่วยเก่าที่ไม่อยู่ในรายการ (เช่น กรัม จากข้อมูลก่อนหน้า) ให้ยังเลือกได้
+    final units = pieceUnits.contains(pieceUnit)
+        ? pieceUnits
+        : [pieceUnit, ...pieceUnits];
+
+    final remainController = TextEditingController(
+      text: _fmtQty(_item!['quantity']),
+    );
+    final totalController = TextEditingController(
+      text: _fmtQty(_item!['max_quantity'] ?? _item!['quantity']),
+    );
+
+    InputDecoration deco(String label, String unit) => InputDecoration(
+      labelText: label,
+      suffixText: unit,
+      filled: true,
+      fillColor: Colors.grey[100],
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide.none,
+      ),
+    );
+
+    return showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final unit = isPortion ? portionUnit : pieceUnit;
+          return AlertDialog(
+            title: const Text(
+              'แก้ไขจำนวน',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      ChoiceChip(
+                        label: const Text('นับเป็นชิ้น'),
+                        selected: !isPortion,
+                        onSelected: (_) =>
+                            setDialogState(() => isPortion = false),
+                      ),
+                      ChoiceChip(
+                        label: const Text('แบ่งเป็นส่วน'),
+                        selected: isPortion,
+                        onSelected: (_) =>
+                            setDialogState(() => isPortion = true),
+                      ),
+                    ],
+                  ),
+                  if (!isPortion) ...[
+                    const SizedBox(height: 10),
+                    DropdownButtonFormField<String>(
+                      value: pieceUnit,
+                      decoration: deco('หน่วย', ''),
+                      items: units
+                          .map(
+                            (u) => DropdownMenuItem(value: u, child: Text(u)),
+                          )
+                          .toList(),
+                      onChanged: (v) {
+                        if (v != null) setDialogState(() => pieceUnit = v);
+                      },
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: remainController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: deco('เหลืออยู่', unit),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: totalController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: deco('ทั้งหมด (ตอนเก็บเข้าตู้เย็น)', unit),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text(
+                  'ยกเลิก',
+                  style: TextStyle(color: Colors.grey),
+                ),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.orange,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                onPressed: () {
+                  final remain = num.tryParse(remainController.text.trim());
+                  num? total = num.tryParse(totalController.text.trim());
+                  if (remain == null || remain < 0) return;
+                  // เหลืออยู่จะมากกว่าทั้งหมดไม่ได้ ถ้ากรอกเกินก็ขยายทั้งหมดตาม
+                  if (total == null || total < remain) total = remain;
+                  Navigator.pop(context);
+                  _updateFields({
+                    'quantity': remain,
+                    'max_quantity': total,
+                    'unit': unit,
+                  });
+                },
+                child: const Text(
+                  'บันทึก',
+                  style: TextStyle(color: Colors.white),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   // --- 🚀 Popup สำหรับเลือกหมวดหมู่ — เลือกได้จากรายการที่กำหนดไว้เท่านั้น
   // (fixedCategories) ไม่ให้พิมพ์ข้อความอิสระ เพื่อไม่ให้เกิดหมวดหมู่แปลกๆ
   // ซ้ำซ้อนในหน้าคลังเหมือนที่เคยเป็นปัญหาก่อนแก้ไขนี้
@@ -203,11 +345,12 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
   // --- 🚀 Popup สำหรับเลือกปฏิทินวันหมดอายุ (ระบบคำนวณให้อัตโนมัติจากตาราง
   // อายุการเก็บรักษา แต่ผู้ใช้ปรับแก้ให้ตรงกับความเป็นจริงได้) ---
   Future<void> _selectExpiryDate() async {
-    DateTime initialDate = DateTime.now();
-    if (_item!['expiry_date'] != null) {
-      initialDate = DateTime.parse(_item!['expiry_date'].toString()).toLocal();
-    }
-    final firstDate = DateTime.now().subtract(const Duration(days: 365));
+    DateTime initialDate = expiryDayOf(_item!) ?? DateTime.now();
+    // หมดอายุก่อนวันที่เข้าตู้เย็นไม่ได้
+    final added = parseCreatedAt(_item!['created_at']);
+    final firstDate = added != null
+        ? DateTime(added.year, added.month, added.day)
+        : DateTime.now().subtract(const Duration(days: 365));
     if (initialDate.isBefore(firstDate)) initialDate = firstDate;
 
     final DateTime? picked = await showDatePicker(
@@ -232,7 +375,31 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
     );
 
     if (picked != null) {
-      _updateField('expiry_date', picked.toIso8601String());
+      final fields = <String, dynamic>{
+        // expiry_date เป็น timestamptz ต้องส่งเป็นเวลา UTC (มี Z ต่อท้าย)
+        'expiry_date': picked.toUtc().toIso8601String(),
+      };
+      // "เก็บได้อีก X วัน" ทุกหน้าคิดจาก วันที่เข้าตู้เย็น + ระยะที่เก็บได้ จึงต้อง
+      // อัปเดตระยะที่เก็บได้ของช่องที่เก็บอยู่ให้ตรงกับวันหมดอายุที่เลือกด้วย
+      // (บันทึกที่มาเป็น "คุณกำหนดเอง" โดยจำค่าเดิมไว้ เลือกกลับเป็นวันเดิมได้)
+      if (added != null) {
+        final days = DateTime(picked.year, picked.month, picked.day)
+            .difference(DateTime(added.year, added.month, added.day))
+            .inDays;
+        final current = shelfDaysOf(_item!);
+        final original = originalShelfSource(
+          _item!['shelf_type']?.toString(),
+          current,
+        );
+        fields[_item!['storage'] == storageFreezer
+                ? 'freezer_days'
+                : 'fridge_days'] =
+            days;
+        fields['shelf_type'] = (original.days != null && days == original.days)
+            ? original.key
+            : customShelfType(original.key, original.days);
+      }
+      _updateFields(fields);
     }
   }
 
@@ -303,9 +470,10 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
         : _item!['fridge_days'];
     final days = raw == null ? null : num.tryParse(raw.toString())?.round();
     if (days != null && _item!['created_at'] != null) {
-      final added = DateTime.parse(_item!['created_at'].toString()).toLocal();
+      final added = parseCreatedAt(_item!['created_at'])!;
       fields['expiry_date'] = added
           .add(Duration(days: days))
+          .toUtc()
           .toIso8601String();
     }
     _updateFields(fields);
@@ -317,7 +485,7 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
     final now = DateTime.now();
     DateTime initialDate = now;
     if (_item!['created_at'] != null) {
-      initialDate = DateTime.parse(_item!['created_at'].toString()).toLocal();
+      initialDate = parseCreatedAt(_item!['created_at']) ?? now;
     }
     final firstDate = now.subtract(const Duration(days: 365)); // ย้อนหลังได้ 1 ปี
     if (initialDate.isBefore(firstDate)) initialDate = firstDate;
@@ -343,10 +511,39 @@ class _ItemDetailScreenState extends State<ItemDetailScreen> {
     );
 
     if (picked != null) {
-      // เก็บเป็นเที่ยงวันตามเวลาเครื่องแล้วแปลงเป็น UTC ให้วันที่ไม่เลื่อนไป
-      // วันอื่นตอนแปลงโซนเวลากลับมาแสดงผล
-      final addedAt = DateTime(picked.year, picked.month, picked.day, 12);
-      _updateField('created_at', addedAt.toUtc().toIso8601String());
+      // เปลี่ยนแค่วันที่ เก็บเวลาที่ใส่ตู้เย็นจริงไว้เหมือนเดิม (เดิมบันทึกเป็น
+      // 12:00 เสมอ ทำให้จำนวนชั่วโมงที่อยู่ในตู้เย็นเพี้ยน) — เลือกวันเดิมก็ไม่
+      // ต้องบันทึกอะไร และเวลาที่ได้ต้องไม่เลยเวลาปัจจุบัน
+      final original = parseCreatedAt(_item!['created_at']) ?? now;
+      if (picked.year == original.year &&
+          picked.month == original.month &&
+          picked.day == original.day) {
+        return;
+      }
+      var addedAt = DateTime(
+        picked.year,
+        picked.month,
+        picked.day,
+        original.hour,
+        original.minute,
+        original.second,
+      );
+      if (addedAt.isAfter(DateTime.now())) addedAt = DateTime.now();
+
+      // เลื่อนวันหมดอายุตามไปเท่ากัน (ระยะที่เก็บได้เท่าเดิม) ไม่งั้น "เก็บได้อีก
+      // X วัน" และหลอดนับจะไม่เปลี่ยนตามวันที่เข้าตู้เย็นที่แก้
+      final fields = <String, dynamic>{
+        'created_at': addedAt.toUtc().toIso8601String(),
+      };
+      final expiryRaw = _item!['expiry_date'];
+      if (expiryRaw != null) {
+        final expiry = DateTime.parse(expiryRaw.toString()).toLocal();
+        fields['expiry_date'] = expiry
+            .add(addedAt.difference(original))
+            .toUtc()
+            .toIso8601String();
+      }
+      _updateFields(fields);
     }
   }
 
@@ -473,10 +670,11 @@ Widget build(BuildContext context) {
                     // 🚀 เชื่อมปุ่มปฏิทินวันหมดอายุ
                     _buildDetailRow(
                       icon: Icons.event_busy,
-                      text: item['expiry_date'] == null
-                          ? "หมดอายุ ไม่ระบุ"
-                          : "หมดอายุ ${_formatThaiDate(item['expiry_date']?.toString())} "
-                                "(${expiryText(daysUntilExpiry(item['expiry_date'])!)})",
+                      // วันที่และข้อความคิดจาก daysLeft ตัวเดียวกับทุกหน้า
+                      text: daysLeft(item) == null
+                          ? "เก็บได้ถึง ไม่ระบุ"
+                          : "เก็บได้ถึง ${_formatThaiDate(expiryDayOf(item)!.toIso8601String())} "
+                                "(${expiryText(daysLeft(item)!)})",
                       onEdit: _selectExpiryDate,
                     ),
                     const SizedBox(height: 10),
@@ -508,17 +706,12 @@ Widget build(BuildContext context) {
                     ),
                     const SizedBox(height: 10),
 
-                    // 🚀 เชื่อมปุ่มแก้ไขจำนวน
+                    // 🚀 เชื่อมปุ่มแก้ไขจำนวน (เหลืออยู่ / ทั้งหมด)
                     _buildDetailRow(
                       icon: Icons.add_circle,
                       text:
-                          "จำนวน : ${item['quantity'] ?? 0} ${item['unit'] ?? ''}",
-                      onEdit: () => _showEditDialog(
-                        'จำนวน',
-                        'quantity',
-                        item['quantity']?.toString() ?? '0',
-                        isNumber: true,
-                      ),
+                          "จำนวน : เหลือ ${_fmtQty(item['quantity'])} จาก ${_fmtQty(item['max_quantity'] ?? item['quantity'])} ${item['unit'] ?? ''}",
+                      onEdit: _showQuantityDialog,
                     ),
                     const SizedBox(height: 30),
 
@@ -538,7 +731,8 @@ Widget build(BuildContext context) {
                       ),
                     if (item['created_at'] != null)
                       Text(
-                        "เข้าตู้เย็นเมื่อ ${_formatThaiDate(item['created_at'].toString())}",
+                        "เข้าตู้เย็นเมื่อ ${_formatThaiDate(parseCreatedAt(item['created_at'])?.toIso8601String())} "
+                        "เวลา ${addedTimeText(item['created_at'])}",
                         style: const TextStyle(
                           fontSize: 15,
                           color: Colors.black54,

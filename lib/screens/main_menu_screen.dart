@@ -10,6 +10,7 @@ import 'meal_plan_screen.dart';
 import 'plan_menu_screen.dart';
 import 'expiration_alert_screen.dart';
 import 'scan_recipe_screen.dart';
+import '../utils/fridge_age.dart';
 
 class MainMenuScreen extends StatefulWidget {
   const MainMenuScreen({super.key});
@@ -69,6 +70,8 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
     }
   }
 
+  // ตัวเลขสรุปต้องนับแบบเดียวกับหน้าคลังเสมอ: วันหมดอายุนับตามวันในปฏิทิน
+  // (daysLeft) และไม่นับของที่ใช้หมดแล้ว (เหลือ 0)
   Future<void> loadExpiryStatus() async {
     final user = supabase.auth.currentUser;
 
@@ -78,7 +81,7 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
 
     final response = await supabase
         .from('fridge_items')
-        .select('expiry_date')
+        .select()
         .eq('user_id', user.id);
 
     int total = response.length;
@@ -87,20 +90,15 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
 
     int expired = 0;
 
-    final now = DateTime.now();
-
     for (var item in response) {
-      if (item['expiry_date'] == null) {
-        continue;
-      }
+      if (isUsedUp(item)) continue;
 
-      final expiry = DateTime.parse(item['expiry_date']);
+      final diff = daysLeft(item);
+      if (diff == null) continue;
 
-      final difference = expiry.difference(now).inDays;
-
-      if (difference < 0) {
+      if (diff < 0) {
         expired++;
-      } else if (difference <= 3) {
+      } else if (diff <= 3) {
         near++;
       }
     }
@@ -238,13 +236,13 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
 
                           stat(
                             nearExpiryItems.toString(),
-                            "ใกล้หมดอายุ",
+                            "ใกล้ครบกำหนด",
                             Colors.orange,
                           ),
 
                           divider(),
 
-                          stat(expiredItems.toString(), "หมดแล้ว", Colors.red),
+                          stat(expiredItems.toString(), "เกินกำหนด", Colors.red),
                         ],
                       ),
                     ),
@@ -316,63 +314,22 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
                           menus[index][2] as String,
 
                           () {
-                            if (index == 0) {
-                              Navigator.push(
-                                context,
+                            const pages = <Widget>[
+                              ImageScanning(),
+                              PlanMenuScreen(),
+                              ExpirationAlertScreen(),
+                              InventoryScreen(),
+                              ScanRecipeScreen(),
+                              AiRecipeScreen(),
+                            ];
 
-                                MaterialPageRoute(
-                                  builder: (_) => const ImageScanning(),
-                                ),
-                              );
-                            }
-
-                            if (index == 1) {
-                              Navigator.push(
-                                context,
-
-                                MaterialPageRoute(
-                                  builder: (_) => const PlanMenuScreen(),
-                                ),
-                              );
-                            }
-                            if (index == 2) {
-                              Navigator.push(
-                                context,
-
-                                MaterialPageRoute(
-                                  builder: (_) => const ExpirationAlertScreen(),
-                                ),
-                              );
-                            }
-
-                            if (index == 3) {
-                              Navigator.push(
-                                context,
-
-                                MaterialPageRoute(
-                                  builder: (_) => const InventoryScreen(),
-                                ),
-                              );
-                            }
-
-                            if (index == 4) {
-                              Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (_) => const ScanRecipeScreen(),
-                                ),
-                              );
-                            }
-
-                            if (index == 5) {
-                              Navigator.push(
-                                context,
-
-                                MaterialPageRoute(
-                                  builder: (_) => const AiRecipeScreen(),
-                                ),
-                              );
-                            }
+                            // กลับมาหน้าหลักแล้วโหลดตัวเลขสรุปใหม่ทุกครั้ง (เช่น
+                            // หลังสแกนเพิ่มของ ทำอาหาร หรือลบของ) ไม่งั้นตัวเลข
+                            // จะค้างเป็นค่าตอนเปิดหน้าครั้งแรก
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => pages[index]),
+                            ).then((_) => loadExpiryStatus());
                           },
                         );
                       },

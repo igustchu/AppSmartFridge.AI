@@ -311,16 +311,22 @@ class _ResultScreenState extends State<ResultScreen> {
         DateTime expiryDate = DateTime.now().add(Duration(days: days));
         final foodState = item['food_state']?.toString() ?? '';
 
-        // ปริมาณที่ตรวจพบจากรูป (เก็บไว้แสดงว่าซื้อมาเท่าไหร่) แยกกับหน่วยที่ใช้
-        // หักตอนทำอาหาร: ถ้าผู้ใช้เลือก "แบ่งเป็นส่วน" ระบบจะนับ/หักเป็น "ส่วน"
-        // แทน ไม่งั้นหักตามปริมาณที่ตรวจพบตรงๆ
-        final detectedQty = num.tryParse(item['quantity'].toString()) ?? 1;
-        final detectedUnit = item['unit']?.toString() ?? 'ชิ้น';
-        final usePortions = item['use_mode'] == 'portion';
-        final num stockQty = usePortions
-            ? (int.tryParse(item['portions'].toString()) ?? 1)
-            : detectedQty;
-        final stockUnit = usePortions ? 'ส่วน' : detectedUnit;
+        // ปริมาณที่ตรวจพบจากรูป (เช่น 1 แพ็ค 500 กรัม) เก็บไว้แสดงเฉยๆ ว่าซื้อมา
+        // เท่าไหร่ ส่วนที่ใช้นับ/หักตอนทำอาหารคือจำนวนชิ้นหรือจำนวนส่วนที่ผู้ใช้
+        // ยืนยัน (คนทำอาหารไม่ได้ชั่ง จึงไม่นับเป็นกรัม)
+        final detectedQty = num.tryParse(item['quantity'].toString());
+        final detectedUnit = item['unit']?.toString();
+        // (การ์ดที่ยังไม่ถูกเลื่อนมาแสดงจะยังไม่ได้ normalize ค่าจาก Gemini จึง
+        // กันไว้ตรงนี้อีกชั้น: หน่วยที่นับเป็นชิ้นไม่ได้ เช่น กรัม → เป็นส่วน)
+        final rawCountUnit = item['count_unit']?.toString().trim() ?? '';
+        final isPiece = item['count_mode'] == 'piece' &&
+            pieceUnits.contains(rawCountUnit);
+        final num stockQty =
+            (num.tryParse(item['count']?.toString() ?? '') ?? 1).round().clamp(
+              1,
+              1 << 30,
+            );
+        final stockUnit = isPiece ? rawCountUnit : 'ส่วน';
 
         await supabase.from('fridge_items').insert({
           'user_id': user.id,
@@ -331,11 +337,24 @@ class _ResultScreenState extends State<ResultScreen> {
           'unit': stockUnit,
           'detected_quantity': detectedQty,
           'detected_unit': detectedUnit,
-          'expiry_date': expiryDate.toIso8601String(),
+          // expiry_date เป็น timestamptz ต้องส่งเป็น UTC (มี Z) ไม่งั้นเลื่อน 7 ชม.
+          'expiry_date': expiryDate.toUtc().toIso8601String(),
           'storage': storage,
           'food_state': foodState.isEmpty ? null : foodState,
           'fridge_days': item['fridge_days'],
           'freezer_days': item['freezer_days'],
+          // จำไว้ว่าระยะที่เก็บได้มาจากตารางประเภทไหน (null = Gemini ประเมิน,
+          // custom = ผู้ใช้แก้จำนวนวันเอง) เพื่อบอกที่มาให้ผู้ใช้เห็นในหน้าแจ้งเตือน
+          'shelf_type': item['expiry_custom'] == true
+              ? customShelfType(
+                  item['shelf_type']?.toString(),
+                  storage == storageFreezer
+                      ? item['freezer_days']
+                      : item['fridge_days'],
+                )
+              : item['shelf_type'],
+          if (item['expiry_custom'] == true)
+            storage == storageFreezer ? 'freezer_days' : 'fridge_days': days,
         });
       }
 
@@ -389,13 +408,15 @@ class IngredientCardItem extends StatefulWidget {
 class _IngredientCardItemState extends State<IngredientCardItem> {
   late TextEditingController nameController;
   late TextEditingController expiryController;
-  late TextEditingController detectedQtyController;
-  late String unit;
+  // วิธีนับเพื่อหักใช้ตอนทำอาหาร (ไม่มีกรัม — คนทำอาหารไม่ได้ชั่ง):
+  // 'piece' = นับเป็นชิ้น (ฟอง/ผล/หัว ฯลฯ), 'portion' = แบ่งเป็นส่วนเอง
+  late String countMode;
+  late int count;
+  late String countUnit;
 
-  // การนำไปใช้หัก: 'detected' = หักตามปริมาณที่ตรวจพบจากรูป,
-  // 'portion' = ผู้ใช้แบ่งเป็นส่วนเอง แล้วหักทีละส่วน
-  late String useMode;
-  late int portions;
+  // หน่วยนับชิ้นล่าสุด (เช่น "ผล") จำไว้ตอนสลับไป "แบ่งเป็นส่วน" แล้วกลับมา
+  // "นับเป็นชิ้น" จะได้คืนเป็นหน่วยเดิม ไม่ใช่กลายเป็น "ชิ้น"
+  String lastPieceUnit = 'ชิ้น';
   late String category;
 
   // การจัดเก็บ: ประเภทตามตารางอายุการเก็บรักษา (null = ไม่ตรงกับตาราง ใช้ค่า
@@ -405,16 +426,6 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
   late String storage;
   late ResolvedShelfLife shelfLife;
 
-  static const List<String> baseUnits = [
-    "ชิ้น",
-    "หัว",
-    "กรัม",
-    "กก.",
-    "แพ็ค",
-    "ขวด",
-    "ลูก",
-    "ฟอง",
-  ];
 
   @override
   void initState() {
@@ -433,23 +444,23 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
       text: (data['expiry_days'] ?? shelfLife.daysFor(storage) ?? 7).toString(),
     );
 
-    final detected = num.tryParse(data['quantity']?.toString() ?? '') ?? 1;
-    detectedQtyController = TextEditingController(text: _formatNum(detected));
-    detectedQtyController.addListener(() {
-      final val = num.tryParse(detectedQtyController.text);
-      if (val != null && val > 0) widget.onUpdate('quantity', val);
-    });
-    widget.onUpdate('quantity', detected);
-    // ใช้หน่วยที่ Gemini ตรวจพบจริง (ถ้าไม่อยู่ในรายการ ก็เพิ่มเข้าไปให้เลือก)
-    unit = (data['unit']?.toString().trim().isNotEmpty ?? false)
-        ? data['unit'].toString().trim()
-        : 'ชิ้น';
-    widget.onUpdate('unit', unit);
+    // ค่าเริ่มต้นจาก Gemini (ดู prompt ใน ImageScanning.dart) ถ้า Gemini ตอบ
+    // หน่วยที่นับเป็นชิ้นไม่ได้ (เช่น กรัม) ให้เปลี่ยนเป็นแบ่งเป็นส่วนแทน
+    final rawUnit = data['count_unit']?.toString().trim() ?? '';
+    countMode = data['count_mode'] == 'piece' && rawUnit != 'ส่วน'
+        ? 'piece'
+        : 'portion';
+    if (countMode == 'piece' && !pieceUnits.contains(rawUnit)) {
+      countMode = rawUnit.isEmpty ? 'piece' : 'portion';
+    }
+    countUnit = countMode == 'piece'
+        ? (pieceUnits.contains(rawUnit) ? rawUnit : 'ชิ้น')
+        : 'ส่วน';
+    lastPieceUnit = pieceUnits.contains(rawUnit) ? rawUnit : 'ชิ้น';
+    count = (num.tryParse(data['count']?.toString() ?? '') ?? 1).round();
+    if (count < 1) count = 1;
+    _pushCount();
 
-    useMode = data['use_mode']?.toString() ?? 'detected';
-    portions = int.tryParse(data['portions']?.toString() ?? '') ?? 3;
-    widget.onUpdate('use_mode', useMode);
-    widget.onUpdate('portions', portions);
     // กันเหนียว: normalize หมวดหมู่ให้เข้าเซ็ตที่กำหนดไว้เสมอ (fixedCategories)
     // เผื่อ AI ตอบมาไม่ตรงเป๊ะ หรือเป็นข้อมูลเก่าก่อนแก้ไขนี้
     category = normalizeCategory((data['category'] ?? 'อื่นๆ').toString());
@@ -461,6 +472,10 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
     expiryController.addListener(() {
       int? val = int.tryParse(expiryController.text);
       if (val != null) widget.onUpdate('expiry_days', val);
+      // จำไว้ว่าผู้ใช้แก้จำนวนวันเองหรือไม่ เพื่อบอกที่มาให้ถูก (และบันทึกเป็น
+      // "กำหนดเองโดยผู้ใช้" ตอนบันทึก)
+      widget.onUpdate('expiry_custom', _isCustomDays);
+      setState(() {});
     });
   }
 
@@ -468,18 +483,44 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
   void dispose() {
     nameController.dispose();
     expiryController.dispose();
-    detectedQtyController.dispose();
     super.dispose();
   }
 
   // ใช้ mapping กลางเดียวกับหน้าคลัง (Inventory) เพื่อให้อิโมจิหมวดหมู่ตรงกันทุกหน้า
   String _getEmoji(String cat) => categoryEmoji(cat);
 
-  List<String> get units =>
-      baseUnits.contains(unit) ? baseUnits : [unit, ...baseUnits];
-
   String _formatNum(num v) =>
       v == v.roundToDouble() ? v.toInt().toString() : v.toString();
+
+  void _pushCount() {
+    widget.onUpdate('count_mode', countMode);
+    widget.onUpdate('count', count);
+    widget.onUpdate('count_unit', countUnit);
+  }
+
+  // บอกให้ชัดว่า 1 ส่วนมีเท่าไหร่ เช่น "3 ลูก แบ่ง 3 ส่วน = ส่วนละประมาณ 1 ลูก"
+  // ผู้ใช้จะได้รู้ว่าทำอาหาร 1 ครั้ง (หัก 1 ส่วน) ใช้ของไปเท่าไหร่
+  String _portionHint() {
+    final q = num.tryParse(widget.initialData['quantity']?.toString() ?? '');
+    final u = widget.initialData['unit']?.toString() ?? '';
+    if (q != null && q > 0 && count > 0) {
+      final per = q / count;
+      final perText = per == per.roundToDouble()
+          ? per.toInt().toString()
+          : per.toStringAsFixed(1);
+      return "${_formatNum(q)} $u แบ่ง $count ส่วน = ส่วนละประมาณ $perText $u "
+          "(ทำอาหาร 1 ครั้ง ใช้ 1 ส่วน)";
+    }
+    return "1 ส่วน = ใช้ทำอาหารได้ 1 ครั้ง";
+  }
+
+  // ข้อความ "ตรวจพบจากรูป: 1 แพ็ค" (แสดงอย่างเดียว ไม่ใช้หัก)
+  String? _detectedText() {
+    final q = num.tryParse(widget.initialData['quantity']?.toString() ?? '');
+    final u = widget.initialData['unit']?.toString() ?? '';
+    if (q == null) return null;
+    return "${_formatNum(q)} $u".trim();
+  }
 
   InputDecoration _boxDecoration() => InputDecoration(
     isDense: true,
@@ -505,65 +546,96 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
     ),
   );
 
-  // ส่วน "การนำไปใช้หัก" — แยกจากปริมาณที่ตรวจพบจากรูป ผู้ใช้กำหนดเองว่าจะ
-  // ให้ระบบหักตามปริมาณจริง (เช่น 500 กรัม) หรือแบ่งเป็นส่วนบริโภค (เช่น 3 ส่วน)
-  Widget _buildUsageSection() {
-    final detectedText =
-        "${detectedQtyController.text.isEmpty ? '-' : detectedQtyController.text} $unit";
+  // ส่วน "ปริมาณ" — วิธีนับที่ใช้หักตอนทำอาหาร นับเป็นชิ้นที่มองเห็นได้
+  // (ไข่ 10 ฟอง) หรือแบ่งเป็นส่วนเอง (หมูสับ 1 แพ็ค แบ่ง 3 ส่วน) ไม่มีกรัม
+  Widget _buildCountSection() {
+    final detected = _detectedText();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _sectionLabel("การนำไปใช้ (หักวัตถุดิบ)"),
+        _sectionLabel("ปริมาณ"),
+        if (detected != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              "ตรวจพบจากรูป: $detected",
+              style: const TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+          ),
         const SizedBox(height: 6),
         Wrap(
           spacing: 8,
           runSpacing: 8,
           children: [
             _buildChip(
-              label: "หักตามที่ตรวจพบ ($detectedText)",
-              selected: useMode == 'detected',
+              label: "นับเป็นชิ้น",
+              selected: countMode == 'piece',
               onTap: () {
-                setState(() => useMode = 'detected');
-                widget.onUpdate('use_mode', useMode);
+                setState(() {
+                  countMode = 'piece';
+                  countUnit = lastPieceUnit;
+                });
+                _pushCount();
               },
             ),
             _buildChip(
               label: "แบ่งเป็นส่วน",
-              selected: useMode == 'portion',
+              selected: countMode == 'portion',
               onTap: () {
-                setState(() => useMode = 'portion');
-                widget.onUpdate('use_mode', useMode);
+                setState(() {
+                  countMode = 'portion';
+                  countUnit = 'ส่วน';
+                });
+                _pushCount();
               },
             ),
           ],
         ),
-        if (useMode == 'portion') ...[
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              _buildCounterButton("-", () {
-                if (portions > 1) {
-                  setState(() => portions--);
-                  widget.onUpdate('portions', portions);
-                }
-              }),
-              Container(
-                width: 50,
-                alignment: Alignment.center,
-                child: Text(
-                  "$portions",
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18,
-                    color: Colors.black87,
-                  ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            _buildCounterButton("-", () {
+              if (count > 1) {
+                setState(() => count--);
+                _pushCount();
+              }
+            }),
+            Container(
+              width: 50,
+              alignment: Alignment.center,
+              child: Text(
+                "$count",
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                  color: Colors.black87,
                 ),
               ),
-              _buildCounterButton("+", () {
-                setState(() => portions++);
-                widget.onUpdate('portions', portions);
-              }),
-              const SizedBox(width: 10),
+            ),
+            _buildCounterButton("+", () {
+              setState(() => count++);
+              _pushCount();
+            }),
+            const SizedBox(width: 12),
+            if (countMode == 'piece')
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  value: countUnit,
+                  decoration: _boxDecoration(),
+                  items: pieceUnits
+                      .map((e) => DropdownMenuItem(value: e, child: Text(e)))
+                      .toList(),
+                  onChanged: (val) {
+                    if (val == null) return;
+                    setState(() {
+                      countUnit = val;
+                      lastPieceUnit = val;
+                    });
+                    _pushCount();
+                  },
+                ),
+              )
+            else
               const Text(
                 "ส่วน",
                 style: TextStyle(
@@ -571,14 +643,13 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
                   color: Colors.black87,
                 ),
               ),
-            ],
-          ),
-        ],
+          ],
+        ),
         const SizedBox(height: 4),
         Text(
-          useMode == 'portion'
-              ? "แบ่ง $detectedText เป็น $portions ส่วน — ทำอาหารแล้วจะหักทีละส่วน"
-              : "ทำอาหารแล้วจะหักตามปริมาณจริง ($unit)",
+          countMode == 'portion'
+              ? _portionHint()
+              : "นับตามจำนวนที่มีจริง",
           style: const TextStyle(fontSize: 12, color: Colors.black54),
         ),
       ],
@@ -616,13 +687,82 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
     _pushShelfLife();
   }
 
-  String _shelfSourceText() {
-    if (shelfType == null) {
-      return "ค่าเริ่มต้นจาก Gemini (ไม่ตรงกับตารางอายุการเก็บรักษา)";
-    }
+  int? get _defaultDays => shelfLife.daysFor(storage);
+
+  bool get _isCustomDays {
+    final typed = int.tryParse(expiryController.text);
+    return typed != null && typed != _defaultDays;
+  }
+
+  // กล่องบอกที่มาของวันหมดอายุ — ตารางอายุการเก็บรักษา (พร้อมแหล่งอ้างอิง) /
+  // AI ประเมินให้ / ผู้ใช้กำหนดเอง ผู้ใช้จะได้รู้ว่าตัวเลขเชื่อได้แค่ไหน
+  Widget _buildShelfSource() {
     final stateText = foodState.isEmpty ? "" : " ($foodState)";
-    return "ค่าเริ่มต้นตามตาราง: ${shelfType!.label}$stateText "
-        "${storageLabel(storage)}";
+    final defaultText = _defaultDays == null
+        ? ""
+        : formatShelfDays(_defaultDays!);
+
+    final IconData icon;
+    final Color color;
+    final String title;
+    final String detail;
+    if (_isCustomDays) {
+      icon = Icons.edit_outlined;
+      color = const Color(0xff5189C9);
+      title = "คุณกำหนดเอง";
+      detail = "ค่าแนะนำคือ $defaultText";
+    } else if (shelfType != null) {
+      icon = Icons.verified_outlined;
+      color = const Color(0xff3F9142);
+      title = "${shelfType!.label}$stateText ${storageLabel(storage)} "
+          "เก็บได้ $defaultText";
+      detail = "ข้อมูลจาก ${shelfType!.source}";
+    } else {
+      icon = Icons.auto_awesome_outlined;
+      color = const Color(0xffE67E22);
+      title = "AI ประเมินให้ว่าเก็บได้ $defaultText";
+      detail = "ควรตรวจสอบอีกครั้ง";
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 18, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.bold,
+                    color: color,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  detail,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Colors.black54,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildChip({
@@ -814,58 +954,17 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
 
           const SizedBox(height: 12),
 
-          // 3. ปริมาณที่ตรวจพบจากรูป (Gemini) — แก้ไขได้ถ้าตรวจพบไม่ตรง
-          _sectionLabel("ปริมาณที่ตรวจพบจากรูป"),
-          const SizedBox(height: 5),
-          Row(
-            children: [
-              SizedBox(
-                width: 90,
-                child: TextFormField(
-                  controller: detectedQtyController,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                  ),
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16,
-                    color: Colors.black87,
-                  ),
-                  decoration: _boxDecoration(),
-                  onChanged: (_) => setState(() {}),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: DropdownButtonFormField<String>(
-                  value: unit,
-                  decoration: _boxDecoration(),
-                  items: units
-                      .map((e) => DropdownMenuItem(value: e, child: Text(e)))
-                      .toList(),
-                  onChanged: (val) {
-                    setState(() => unit = val!);
-                    widget.onUpdate('unit', val);
-                  },
-                ),
-              ),
-            ],
-          ),
+          // 3. วิธีนับเพื่อหักใช้ (นับเป็นชิ้น / แบ่งเป็นส่วน)
+          _buildCountSection(),
 
           const SizedBox(height: 12),
 
-          // 4. การนำไปใช้หัก (ผู้ใช้กำหนดเอง แยกจากปริมาณที่ตรวจพบ)
-          _buildUsageSection(),
-
-          const SizedBox(height: 12),
-
-          // 5. ช่องที่เก็บ + สถานะ (ใช้คำนวณวันหมดอายุเริ่มต้น)
+          // 4. ช่องที่เก็บ + สถานะ (ใช้คำนวณวันหมดอายุเริ่มต้น)
           _buildStorageSection(),
 
           const SizedBox(height: 12),
 
-          // 6. วันหมดอายุ (คำนวณอัตโนมัติจากตาราง แก้ไขเองได้)
+          // 5. อายุการเก็บรักษา (คำนวณอัตโนมัติจากตาราง แก้ไขเองได้)
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
@@ -880,7 +979,7 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const Text(
-                        "อีกกี่วันหมดอายุ:",
+                        "อายุการเก็บรักษา:",
                         style: TextStyle(fontSize: 12, color: Colors.black54),
                       ),
                       SizedBox(
@@ -896,6 +995,7 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
                             border: InputBorder.none,
                             isDense: true,
                             contentPadding: EdgeInsets.zero,
+                            suffixText: "วัน",
                           ),
                           onChanged: (val) => setState(() {}),
                         ),
@@ -909,7 +1009,7 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     const Text(
-                      "วันที่หมดอายุ",
+                      "เก็บได้ถึงวันที่",
                       style: TextStyle(fontSize: 12, color: Colors.black54),
                     ),
                     Text(
@@ -924,11 +1024,8 @@ class _IngredientCardItemState extends State<IngredientCardItem> {
               ],
             ),
           ),
-          const SizedBox(height: 4),
-          Text(
-            _shelfSourceText(),
-            style: const TextStyle(fontSize: 12, color: Colors.black54),
-          ),
+          const SizedBox(height: 8),
+          _buildShelfSource(),
         ],
       ),
     );

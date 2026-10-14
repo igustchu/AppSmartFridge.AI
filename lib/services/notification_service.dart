@@ -7,23 +7,20 @@ import 'package:timezone/timezone.dart' as tz;
 
 import '../utils/fridge_age.dart';
 
-/// บริการแจ้งเตือนวัตถุดิบที่อยู่ในตู้เย็นนานแล้ว — อ่านค่า "แจ้งเตือนเมื่อ
-/// อยู่ในตู้เย็นครบกี่วัน" (notify_days) ที่ผู้ใช้ตั้งไว้ในหน้า
+/// บริการแจ้งเตือนวัตถุดิบที่ใกล้ครบอายุการเก็บรักษา — อ่านค่า "แจ้งเตือน
+/// ล่วงหน้ากี่วันก่อนครบอายุการเก็บรักษา" (notify_days) ที่ผู้ใช้ตั้งไว้ในหน้า
 /// notification_settings_screen.dart (เก็บใน user_metadata ของ Supabase Auth)
-/// แล้วเทียบกับวันที่เพิ่มวัตถุดิบแต่ละชิ้นเข้าตู้เย็น (created_at) ใน
-/// fridge_items เพื่อยิงแจ้งเตือนจริงไปยังเครื่องผู้ใช้
+/// แล้วนับถอยหลังจากอายุการเก็บรักษาของวัตถุดิบแต่ละชิ้น (ดู daysLeft
+/// ใน fridge_age.dart) ข้อความแจ้งเตือนบอกว่าอยู่ในตู้เย็นมาแล้วกี่วัน
 ///
 /// ใช้ 2 กลไกร่วมกันเพราะแอปนี้เป็น client-only (ไม่มีเซิร์ฟเวอร์/ฟังก์ชัน
 /// แบ็กเอนด์คอยรันตอนแอปปิดอยู่):
 /// 1. scheduleExpiryReminders() — ตั้งแจ้งเตือนล่วงหน้าไว้ให้ระบบปฏิบัติการ
-///    ยิงเองตามเวลาที่กำหนด (09:00 ของวันที่ของชิ้นนั้น "อยู่ในตู้เย็นครบ N วัน
-///    ตามที่ตั้งไว้") ผ่าน flutter_local_notifications ซึ่งจะทำงานแม้แอปถูกปิด
-///    อยู่ เพราะระบบปฏิบัติการเป็นคนยิงให้ ไม่ใช่ตัวแอป
+///    ยิงเองตอน 09:00 ของวันที่เหลือ notify_days วันก่อนครบอายุการเก็บรักษา
+///    ผ่าน flutter_local_notifications ซึ่งทำงานแม้แอปถูกปิดอยู่
 /// 2. checkAndShowDueReminders() — เช็กซ้ำทุกครั้งที่เปิดแอป/หน้าคลัง ว่ามี
-///    วัตถุดิบที่ตอนนี้อยู่ในตู้เย็นมาแล้วตั้งแต่ notify_days วันขึ้นไป แล้วยัง
-///    ไม่เคยเตือนวันนี้หรือยัง ถ้ายังไม่เคย จะยิงแจ้งเตือนทันที — ทำให้ตราบใด
-///    ที่ผู้ใช้เปิดแอปอย่างน้อยวันละครั้ง จะได้รับการเตือนซ้ำทุกวันที่ยังมีของ
-///    ที่อยู่นานค้างอยู่
+///    วัตถุดิบที่ถึงช่วงต้องเตือนแล้ว และวันนี้ยังไม่เคยเตือน ถ้ายัง จะยิง
+///    แจ้งเตือนทันที (รวมทุกรายการเป็นข้อความเดียว)
 ///
 /// ข้อจำกัดที่ควรรู้: บน iOS ระบบปฏิบัติการจำกัดจำนวนแจ้งเตือนที่ "ตั้งรอไว้ล่วงหน้า"
 /// (pending) ได้สูงสุด 64 รายการต่อแอป ถ้ามีวัตถุดิบเยอะมากพร้อมกัน อาจมีบาง
@@ -160,12 +157,8 @@ class NotificationService {
       if (createdRaw == null) continue;
       if (isUsedUp(item)) continue; // ใช้หมดแล้ว ไม่ต้องเตือน
 
-      DateTime addedDate;
-      try {
-        addedDate = DateTime.parse(createdRaw.toString()).toLocal();
-      } catch (_) {
-        continue;
-      }
+      final addedDate = parseCreatedAt(createdRaw);
+      if (addedDate == null) continue;
       final addedDay = DateTime(
         addedDate.year,
         addedDate.month,
@@ -175,9 +168,13 @@ class NotificationService {
       final name = item['name']?.toString() ?? 'วัตถุดิบ';
       final itemId = item['item_id']?.toString() ?? name;
 
-      // เกณฑ์ของแต่ละชิ้น: ไม่เกินค่าที่ตั้งไว้ และเร็วขึ้นสำหรับของที่เน่าเร็ว
-      final itemDays = oldThresholdFor(item, notifyDays);
-      final triggerDay = addedDay.add(Duration(days: itemDays));
+      // นับถอยหลัง: เตือนล่วงหน้า notifyDays วันก่อนครบอายุการเก็บรักษาของชิ้นนั้น
+      final remaining = daysLeft(item);
+      if (remaining == null) continue; // ไม่มีข้อมูลอายุการเก็บรักษา
+      final shelfEndDay = DateTime(now.year, now.month, now.day)
+          .add(Duration(days: remaining.floor()));
+      final triggerDay = shelfEndDay.subtract(Duration(days: notifyDays));
+      final ageAtTrigger = triggerDay.difference(addedDay).inDays;
       final triggerTime = DateTime(
         triggerDay.year,
         triggerDay.month,
@@ -193,7 +190,7 @@ class NotificationService {
           await notifications.zonedSchedule(
             _stableId(itemId),
             "🔔 SmartFridge",
-            "$name อยู่ในตู้เย็นมาแล้ว $itemDays วัน — ควรรีบเอาไปทำอาหารนะ!",
+            "$name อยู่ในตู้เย็นมาแล้ว ${ageAtTrigger < 0 ? 0 : ageAtTrigger} วัน — ${useWithinText(notifyDays)}",
             _toTz(triggerTime),
             const NotificationDetails(
               android: AndroidNotificationDetails(
@@ -263,7 +260,7 @@ class NotificationService {
 
     final List<String> oldItemNames = [];
     for (final item in fridgeItems) {
-      if (isOldItem(item, days)) {
+      if (isDueForReminder(item, days)) {
         oldItemNames.add(item['name']?.toString() ?? 'วัตถุดิบ');
       }
     }
@@ -277,8 +274,8 @@ class NotificationService {
     if (lastNotified == todayKey) return; // วันนี้เตือนไปแล้ว ไม่เตือนซ้ำ
 
     final String message = oldItemNames.length == 1
-        ? "${oldItemNames.first} อยู่ในตู้เย็นนานแล้ว ควรรีบเอาไปทำอาหารนะ!"
-        : "มีวัตถุดิบที่อยู่ในตู้เย็นนานแล้ว ควรรีบใช้ ${oldItemNames.length} รายการ: "
+        ? "${oldItemNames.first} ใกล้ครบอายุการเก็บรักษาแล้ว รีบเอาไปทำอาหารนะ!"
+        : "มีวัตถุดิบใกล้ครบอายุการเก็บรักษา ${oldItemNames.length} รายการ: "
               "${oldItemNames.take(5).join(', ')}"
               "${oldItemNames.length > 5 ? ' และอื่นๆ' : ''}";
 

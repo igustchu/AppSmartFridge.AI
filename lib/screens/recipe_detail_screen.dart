@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
 import '../widgets/recipe_flow_widgets.dart';
+import '../widgets/deduct_confirm_sheet.dart';
 import '../services/fridge_stock.dart';
 
 /// หน้ารายละเอียดสูตรอาหารที่บันทึกไว้ (ตามดีไซน์ใน Figma: "Smart Recipe" หน้าเมนู)
@@ -82,38 +83,29 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
 
   // ฟังก์ชันหักวัตถุดิบออกจาก Supabase
   Future<void> _startCooking() async {
-    // แจ้งเตือนยืนยัน
-    bool confirm =
-        await showDialog(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text("เริ่มทำอาหาร?"),
-            content: const Text(
-              "ระบบจะทำการหักวัตถุดิบที่ใช้ในเมนูนี้ออกจากคลังของคุณอัตโนมัติ",
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: const Text("ยกเลิก"),
-              ),
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                style: TextButton.styleFrom(foregroundColor: const Color(0xff5189C9)),
-                child: const Text("ตกลง, หักวัตถุดิบเลย"),
-              ),
-            ],
-          ),
-        ) ??
-        false;
+    List<dynamic> detailedIngredients =
+        widget.recipe['detailed_ingredients'] ?? [];
 
-    if (!confirm) return;
+    // ให้ผู้ใช้ยืนยันก่อนว่าใช้ไปเท่าไหร่จริง (กดเลือกแบบกะด้วยตา ไม่ต้องชั่ง)
+    // ค่าเริ่มต้นตามที่สูตรบอก — กดยกเลิกก็ไม่หักอะไรเลย
+    final choices = await showDeductConfirmSheet(
+      context,
+      inventory: widget.inventory,
+      requests: [
+        for (final needed in detailedIngredients)
+          if ((needed['name'] ?? '').toString().trim().isNotEmpty)
+            DeductRequest(
+              name: needed['name'].toString(),
+              suggested: _toNum(needed['use_quantity']),
+            ),
+      ],
+    );
+    if (choices == null || !mounted) return;
 
     setState(() => _isCooking = true);
 
     try {
       final supabase = Supabase.instance.client;
-      List<dynamic> detailedIngredients =
-          widget.recipe['detailed_ingredients'] ?? [];
 
       int deductedCount = 0;
       List<String> notFoundNames = [];
@@ -128,26 +120,27 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
           .map((e) => Map<String, dynamic>.from(e))
           .toList();
 
-      // วนลูปเช็ควัตถุดิบที่ AI บอกว่าต้องใช้ แล้วหักตามสัดส่วนแบบ FIFO (ลอตที่
-      // ใกล้หมดอายุ/เก่าที่สุดก่อน ถ้าไม่พอหักลอตถัดไปต่อ) ผ่าน fridge_stock.dart
-      for (var needed in detailedIngredients) {
-        String neededNameRaw = (needed['name'] ?? '').toString();
-        num neededQty = _toNum(needed['use_quantity']);
-
-        if (neededNameRaw.trim().isEmpty) continue;
+      // หักตามปริมาณที่ผู้ใช้ยืนยันแบบ FIFO (ลอตที่ใกล้หมดอายุ/เก่าที่สุดก่อน
+      // ถ้าไม่พอหักลอตถัดไปต่อ) ผ่าน fridge_stock.dart
+      for (final choice in choices) {
+        if (choice.amount == null) {
+          notFoundNames.add(choice.name);
+          continue;
+        }
+        if (choice.amount! <= 0) continue; // ผู้ใช้เลือก "ไม่ได้ใช้"
 
         final result = await deductIngredientFifo(
           supabase: supabase,
           inventory: inventory,
-          name: neededNameRaw,
-          amount: neededQty,
+          name: choice.name,
+          amount: choice.amount!,
         );
 
         if (!result.found) {
-          notFoundNames.add(neededNameRaw);
+          notFoundNames.add(choice.name);
         } else if (result.error != null) {
-          updateErrors.add("$neededNameRaw: ${result.error}");
-        } else if (neededQty > 0) {
+          updateErrors.add("${choice.name}: ${result.error}");
+        } else {
           deductedCount++;
         }
       }
@@ -163,6 +156,10 @@ class _RecipeDetailScreenState extends State<RecipeDetailScreen> {
           // ไม่งั้นจะดูเหมือนกดแล้วไม่มีอะไรเกิดขึ้นเลย ทั้งที่จริงๆ error
           message = "หักวัตถุดิบไม่สำเร็จบางรายการ: ${updateErrors.join(' | ')}";
           bgColor = Colors.red;
+        } else if (deductedCount == 0 && !hasNotFound) {
+          // ผู้ใช้เลือก "ไม่ได้ใช้" ทุกรายการในหน้ายืนยัน
+          message = "ทำอาหารเสร็จสิ้น! ไม่ได้หักวัตถุดิบออกจากตู้เย็น";
+          bgColor = Colors.green;
         } else if (deductedCount == 0) {
           // ไม่พบวัตถุดิบที่ตรงกันในคลังเลยสักชิ้น ไม่ควรบอกว่า "เรียบร้อยแล้ว"
           message = "ไม่พบวัตถุดิบที่ตรงกับในคลังเลย จึงยังไม่ได้หักอะไรออก "

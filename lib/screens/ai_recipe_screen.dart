@@ -7,6 +7,7 @@ import '../widgets/app_bottom_nav.dart';
 import '../widgets/app_icons.dart';
 import '../config/api_keys.dart';
 import '../services/fridge_stock.dart';
+import '../services/gemini_retry.dart';
 import '../utils/fridge_age.dart';
 
 class AiRecipeScreen extends StatefulWidget {
@@ -26,7 +27,7 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
   // วัตถุดิบทุกชิ้นที่ยังเหลืออยู่ เรียงจากอยู่ในตู้เย็นนานที่สุด ใช้แสดงในการ์ด
   // "วัตถุดิบในตู้เย็น" (แสดงเสมอ ไม่ใช่เฉพาะของที่อยู่นานเกินกำหนด)
   List<Map<String, dynamic>> _fridgeByAge = [];
-  int _oldItemDays = defaultOldItemDays;
+  int _aheadDays = defaultOldItemDays;
   List<dynamic> _generatedRecipes = []; // เก็บเมนูที่ AI สร้างให้
 
   // ตัวแปรสำหรับ Filter
@@ -72,7 +73,7 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
 
       List<Map<String, dynamic>> oldItems = [];
       List<Map<String, dynamic>> byAge = [];
-      final oldItemDays = readOldItemDays(supabase.auth.currentUser);
+      final aheadDays = readOldItemDays(supabase.auth.currentUser);
 
       for (var item in data) {
         // ถ้าใช้วัตถุดิบชิ้นนี้หมดแล้ว (เช่น กดทำอาหารจนหักจำนวนเหลือ 0) ก็ไม่
@@ -83,31 +84,38 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
         final days = daysInFridge(item['created_at']);
         item['days_in_fridge'] = days; // เก็บค่าไว้ใช้แสดงผล
         byAge.add(item);
-        // ควรเอาไปทำอาหารก่อน: อยู่นานจนควรรีบใช้ หรือเหลืออีกไม่เกิน 3 วันจะ
-        // หมดอายุ (รวมของที่หมดอายุไปแล้วด้วย จะได้เห็นและจัดการ)
-        final expiry = daysUntilExpiry(item['expiry_date']);
-        if (isOldItem(item, oldItemDays) || (expiry != null && expiry <= 3)) {
+        // ควรเอาไปทำอาหารก่อน: เก็บได้อีกไม่เกินจำนวนวันที่ตั้งไว้ในหน้าตั้งค่า
+        // แจ้งเตือน (นับเป็นวัน ไม่ใช้เปอร์เซ็นต์) และยังไม่เกินกำหนด
+        if (shouldUseFirst(item, aheadDays)) {
           oldItems.add(item);
         }
       }
 
-      // เรียงของที่จะหมดอายุก่อนขึ้นบน (ไม่มีวันหมดอายุไว้ท้าย ถ้าหมดอายุวัน
-      // เดียวกัน ของที่อยู่ในตู้เย็นนานกว่าขึ้นก่อน) — ลำดับนี้คือลำดับที่ควร
-      // เอาไปทำอาหารก่อน และส่งให้ AI ตามลำดับนี้ด้วย
-      oldItems.sort(compareFifo);
-      byAge.sort(compareFifo);
+      // เหลือวันน้อยที่สุดขึ้นก่อน ตรงกับ "เก็บได้อีก X วัน" ที่แสดงบนการ์ด
+      // (เหมือนหน้าแจ้งเตือน) — ลำดับนี้ส่งให้ AI ใช้ของก่อนด้วย
+      oldItems.sort(compareDaysLeft);
+      byAge.sort(compareDaysLeft);
 
       setState(() {
         _inventory = data;
         _oldItems = oldItems;
         _fridgeByAge = byAge;
-        _oldItemDays = oldItemDays;
+        _aheadDays = aheadDays;
         _isLoadingData = false;
       });
     } catch (e) {
       print("Error fetching inventory: $e");
       setState(() => _isLoadingData = false);
     }
+  }
+
+  // สีของ "เก็บได้อีก X วัน": ครบกำหนด/เกินแล้ว = แดง, เหลือไม่เกินจำนวนวันที่
+  // ตั้งแจ้งเตือนไว้ = ส้ม, นอกนั้น = เขียว
+  Color _daysLeftColor(int? left) {
+    if (left == null) return Colors.black45;
+    if (left <= 0) return Colors.red;
+    if (left <= _aheadDays) return Colors.orange.shade800;
+    return const Color(0xff3F9142);
   }
 
   // 2. ส่งข้อมูลให้ Gemini คิดเมนู
@@ -129,28 +137,32 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
     try {
       // ⚠️ ใส่ API Key ของคุณที่นี่
       final String apiKey = ApiKeys.aiRecipeScreen;
-      final model = GenerativeModel(model: 'gemini-3.6-flash', apiKey: apiKey);
 
       // เตรียมรายชื่อวัตถุดิบเป็น Text (ไม่เอาของที่หมดแล้ว/เหลือ 0 ชิ้น มา
       // เสนอให้ AI ใช้ เพราะจริงๆ ไม่มีของเหลือให้ทำอาหารแล้ว)
       // (ลอตที่ชื่อ/หน่วยเดียวกันจะถูกรวมเป็นรายการเดียว)
-      String allItems = inventoryPromptList(_inventory);
-      String oldItemNames = _oldItems
-          .map((e) {
-            final expiry = daysUntilExpiry(e['expiry_date']);
-            final expiryNote = expiry == null ? '' : ', ${expiryText(expiry)}';
-            return "${e['name']} (อยู่มา ${fridgeAgeDuration(e['created_at'])}$expiryNote)";
-          })
+      // ของที่เกินระยะที่เก็บได้แล้วไม่ส่งให้ AI เอาไปทำเมนู (อาจไม่ปลอดภัย
+      // ให้ผู้ใช้ตรวจเองก่อน)
+      String allItems = inventoryPromptList(
+        _inventory.where((e) => !isOverdue(e)).toList(),
+      );
+      final useFirst = _oldItems
+          .map((e) => "${e['name']} (${daysLeftText(daysLeft(e)!)})")
           .join(", ");
 
       final prompt = TextPart("""
         คุณคือเชฟอัจฉริยะ ช่วยคิดเมนูอาหาร 3 เมนู ที่สามารถทำได้จากวัตถุดิบเหล่านี้เป็นหลัก
         วัตถุดิบที่มี: $allItems
-        วัตถุดิบที่ควรใช้ก่อน เรียงจากที่จะหมดอายุก่อน (พยายามบังคับใช้ในเมนู โดยใช้ตัวแรกๆ ก่อน): ${oldItemNames.isEmpty ? 'ไม่มี' : oldItemNames}
+        วัตถุดิบที่ควรใช้ก่อน เรียงจากเก็บได้อีกน้อยวันที่สุด: ${useFirst.isEmpty ? 'ไม่มี' : useFirst}
+        ถ้ามีวัตถุดิบที่ควรใช้ก่อน ทุกเมนูต้องใช้วัตถุดิบกลุ่มนี้อย่างน้อย 1 อย่าง (ตัวแรกๆ ก่อน)
 
         เงื่อนไขเพิ่มเติม:
         - ประเภทอาหาร: ${_selectedCategory == 'ทั้งหมด' ? 'อะไรก็ได้' : _selectedCategory}
         - เวลาทำ: ${_timeConstraintForPrompt()}
+
+        สำคัญเรื่องปริมาณใน detailed_ingredients: ผู้ใช้ไม่ได้ชั่งตวง ให้ใช้หน่วยเดียวกับ
+        วัตถุดิบที่มีในวงเล็บเท่านั้น (เช่น ส่วน, ฟอง, ผล, หัว) ห้ามใช้กรัม/กก./มล./ช้อน
+        และ use_quantity ห้ามเกินจำนวนที่มี (1 ส่วน ≈ ใช้ทำอาหาร 1 ครั้ง ใช้ 0.5 ได้)
 
         ตอบกลับมาเป็น JSON Array เท่านั้น ตามรูปแบบนี้เป๊ะๆ:
         [
@@ -160,7 +172,7 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
             "servings": "จำนวนที่ได้ (เช่น 2 ที่)",
             "ingredients_used": ["วัตถุดิบหลัก1", "วัตถุดิบหลัก2"],
             "detailed_ingredients": [
-              {"name": "ชื่อวัตถุดิบให้ตรงกับที่มีเป๊ะๆ", "use_quantity": จำนวนเลข(ใส่แค่เลข), "unit": "หน่วย"}
+              {"name": "ชื่อวัตถุดิบให้ตรงกับที่มีเป๊ะๆ", "use_quantity": จำนวนเลข(ใส่แค่เลข), "unit": "หน่วยเดียวกับวัตถุดิบที่มี"}
             ],
             "instructions": [
               "1. ขั้นตอนแรก...",
@@ -171,9 +183,14 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
         ห้ามใส่ Markdown ```json
       """);
 
-      final response = await _generateContentWithRetry(model, [
-        Content.multi([prompt]),
-      ]);
+      // Gemini ตอบ 503 "high demand" ได้เป็นพักๆ ลองใหม่อัตโนมัติก่อนแจ้ง error
+      final response = await generateGemini(
+        apiKey: apiKey,
+        content: [
+          Content.multi([prompt]),
+        ],
+        timeout: const Duration(seconds: 60),
+      );
 
       if (response.text != null) {
         String cleanJson = response.text!
@@ -191,55 +208,15 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
         });
       }
     } catch (e) {
-      final message = e.toString();
-      final isOverloaded = message.contains('503') ||
-          message.contains('UNAVAILABLE') ||
-          message.contains('high demand');
-
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            isOverloaded
-                ? 'ตอนนี้ AI มีคนใช้งานเยอะ ลองใหม่อีกครั้งอีกสักครู่นะครับ'
-                : 'สร้างเมนูไม่สำเร็จ: $e',
-          ),
+          content: Text(geminiErrorMessage(e, fallback: 'สร้างเมนูไม่สำเร็จ')),
           backgroundColor: Colors.red,
         ),
       );
     } finally {
       setState(() => _isGenerating = false);
     }
-  }
-
-  // ลอง generateContent ซ้ำเองถ้าเจอ error ฝั่งเซิร์ฟเวอร์ของ Gemini ที่เกิดจาก
-  // โมเดลมีคนใช้งานพร้อมกันเยอะชั่วคราว (503 / UNAVAILABLE / high demand)
-  // เพราะ error แบบนี้ไม่ใช่บั๊กของเรา แค่ต้องรอแป๊บนึงแล้วยิงคำขอใหม่ก็มัก
-  // จะผ่าน จึงลองใหม่ให้อัตโนมัติก่อนที่จะโชว์ error ให้ผู้ใช้เห็นจริงๆ
-  Future<GenerateContentResponse> _generateContentWithRetry(
-    GenerativeModel model,
-    List<Content> content, {
-    int maxAttempts = 3,
-  }) async {
-    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        return await model
-            .generateContent(content)
-            .timeout(const Duration(seconds: 60));
-      } catch (e) {
-        final message = e.toString();
-        final isOverloaded = message.contains('503') ||
-            message.contains('UNAVAILABLE') ||
-            message.contains('high demand');
-
-        if (!isOverloaded || attempt == maxAttempts) rethrow;
-
-        // รอนานขึ้นเรื่อยๆ ก่อนลองใหม่ (2 วินาที แล้ว 4 วินาที)
-        await Future.delayed(Duration(seconds: 2 * attempt));
-      }
-    }
-
-    // ไม่ควรมาถึงบรรทัดนี้ได้ (ลูปด้านบน return หรือ rethrow เสมอ)
-    throw Exception('สร้างเมนูไม่สำเร็จ');
   }
 
   @override
@@ -316,7 +293,7 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 20.0),
                     child: Text(
-                      "สร้างเมนูจากวัตถุดิบที่มี โดยใช้ของที่ใกล้หมดอายุก่อน",
+                      "สร้างเมนูจากวัตถุดิบที่มี โดยใช้ของที่เก็บได้อีกน้อยวันก่อน",
                       style: TextStyle(color: Colors.grey.shade700, fontSize: 13),
                     ),
                   ),
@@ -364,10 +341,8 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
                             ),
                             const SizedBox(height: 10),
                             ..._fridgeByAge.map((item) {
-                              final isOld = isOldItem(item, _oldItemDays);
-                              final expiry = daysUntilExpiry(
-                                item['expiry_date'],
-                              );
+                              final left = daysLeft(item);
+                              final leftColor = _daysLeftColor(left);
                               return Padding(
                                 padding: const EdgeInsets.only(
                                   bottom: 6.0,
@@ -385,33 +360,27 @@ class _AiRecipeScreenState extends State<AiRecipeScreen> {
                                         ),
                                       ),
                                     ),
-                                    // ของที่อยู่ครบตามวันที่ตั้งไว้ = สีแดง (ควร
-                                    // รีบใช้ AI จะเลือกใช้ก่อน) นอกนั้นสีฟ้า
                                     Column(
                                       crossAxisAlignment:
                                           CrossAxisAlignment.end,
                                       children: [
                                         Text(
-                                          "อยู่มา ${fridgeAgeDuration(item['created_at'])}",
-                                          style: TextStyle(
-                                            color: isOld
-                                                ? Colors.red
-                                                : const Color(0xff5189C9),
+                                          fridgeAgeShort(item['created_at']),
+                                          style: const TextStyle(
+                                            color: Color(0xff5189C9),
                                             fontWeight: FontWeight.bold,
                                             fontSize: 13,
                                           ),
                                         ),
-                                        // จะหมดอายุในอีกกี่วัน (เหลือไม่เกิน 3
-                                        // วัน = แดง, นอกนั้นเทา)
-                                        if (expiry != null)
+                                        // นับเป็นวัน: เก็บได้อีก X วัน → ครบ
+                                        // กำหนดวันนี้ → เกินมาแล้ว X วัน
+                                        if (left != null)
                                           Text(
-                                            expiryText(expiry),
+                                            daysLeftText(left),
                                             style: TextStyle(
-                                              color: expiry <= 3
-                                                  ? Colors.red
-                                                  : Colors.black54,
+                                              color: leftColor,
                                               fontSize: 12,
-                                              fontWeight: expiry <= 3
+                                              fontWeight: left <= _aheadDays
                                                   ? FontWeight.bold
                                                   : FontWeight.normal,
                                             ),

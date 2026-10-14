@@ -1,6 +1,7 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../utils/fridge_age.dart';
+import '../utils/shelf_life.dart';
 
 /// ผลการหักวัตถุดิบ 1 รายการ
 class DeductResult {
@@ -109,4 +110,42 @@ String inventoryPromptList(List<Map<String, dynamic>> inventory) {
         return "${parts[0]} ($qty ${parts[1]})";
       })
       .join(", ");
+}
+
+/// ผู้ใช้ตรวจแล้วว่ายังใช้ได้ ต่อเวลาให้ "เก็บได้อีก [moreDays] วัน" นับจากวันนี้
+/// — ปรับระยะที่เก็บได้ของช่องที่เก็บอยู่ = จำนวนวันที่อยู่มาแล้ว + [moreDays]
+/// วันหมดอายุเลื่อนตาม และบันทึกที่มาเป็น "คุณกำหนดเอง" (จำค่าแนะนำเดิมไว้)
+/// ของเก่าที่ไม่มีข้อมูลระยะที่เก็บได้ เลื่อนแค่วันหมดอายุ
+Future<void> extendShelfLife({
+  required SupabaseClient supabase,
+  required Map<String, dynamic> item,
+  required int moreDays,
+}) async {
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final fields = <String, dynamic>{
+    'expiry_date': today
+        .add(Duration(days: moreDays, hours: 12))
+        .toUtc()
+        .toIso8601String(),
+  };
+
+  final current = shelfDaysOf(item);
+  if (current != null && item['created_at'] != null) {
+    final newDays = daysInFridge(item['created_at']) + moreDays;
+    final original = originalShelfSource(
+      item['shelf_type']?.toString(),
+      current,
+    );
+    fields[item['storage'] == storageFreezer ? 'freezer_days' : 'fridge_days'] =
+        newDays;
+    fields['shelf_type'] = (original.days != null && newDays == original.days)
+        ? original.key
+        : customShelfType(original.key, original.days);
+  }
+
+  await supabase
+      .from('fridge_items')
+      .update(fields)
+      .eq('item_id', item['item_id']);
 }

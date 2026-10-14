@@ -12,6 +12,7 @@ import '../widgets/app_icons.dart';
 import '../widgets/recipe_flow_widgets.dart';
 import 'result_screen.dart';
 import '../config/api_keys.dart';
+import '../services/gemini_retry.dart';
 
 /// หน้าถ่ายรูปวัตถุดิบเพื่อสแกนเข้าตู้เย็น (ตามดีไซน์ใน Figma: "SCAN")
 /// รายการ "วัตถุดิบที่เพิ่มล่าสุด" ดึงจาก Supabase จริงเสมอ (ไม่ใช้ตัวเลข mock ของ Figma)
@@ -23,6 +24,38 @@ class ImageScanning extends StatefulWidget {
 }
 
 class _ImageScanningState extends State<ImageScanning> {
+  // แบบฟอร์มคำตอบของ Gemini (structured output) — ใช้ enum บังคับค่าให้อยู่ใน
+  // ชุดที่แอปรู้จักเสมอ
+  static final Schema _scanSchema = Schema.array(
+    items: Schema.object(
+      properties: {
+        'name': Schema.string(description: 'ชื่อวัตถุดิบภาษาไทย'),
+        'category': Schema.enumString(enumValues: fixedCategories),
+        'quantity': Schema.number(),
+        'unit': Schema.string(),
+        'count_mode': Schema.enumString(enumValues: ['piece', 'portion']),
+        'count': Schema.integer(),
+        'count_unit': Schema.string(),
+        'shelf_type': Schema.enumString(
+          enumValues: [...shelfTypes.map((t) => t.key), 'other'],
+        ),
+        'fridge_days': Schema.integer(),
+        'freezer_days': Schema.integer(nullable: true),
+      },
+      requiredProperties: [
+        'name',
+        'category',
+        'quantity',
+        'unit',
+        'count_mode',
+        'count',
+        'count_unit',
+        'shelf_type',
+        'fridge_days',
+      ],
+    ),
+  );
+
   final ImagePicker _picker = ImagePicker();
   final String _apiKey = ApiKeys.imageScanning;
 
@@ -64,13 +97,13 @@ class _ImageScanningState extends State<ImageScanning> {
       // จำกัดขนาดรูปก่อนส่งเข้า Gemini — กล้องมือถือสมัยนี้ถ่ายได้ไฟล์ใหญ่มาก
       // (10+ MB) ถ้าส่งเต็มขนาดจริงจะอัพโหลดช้าและโมเดลประมวลผลช้าตามไปด้วย
       // โดยไม่ได้ช่วยให้แม่นยำขึ้นเลย (โมเดล vision ย่อภาพลงประมวลผลอยู่แล้ว)
-      // ย่อเหลือด้านยาวสุดไม่เกิน 1024px และลดคุณภาพลงเล็กน้อยช่วยให้เร็วขึ้น
-      // มากโดยไม่กระทบความแม่นยำในการจำแนกวัตถุดิบ
+      // ย่อเหลือด้านยาวสุดไม่เกิน 768px คุณภาพ 70% (ไฟล์เล็กลงราวครึ่งจาก
+      // 1024px/80%) อัปโหลดและประมวลผลเร็วขึ้น ยังเห็นวัตถุดิบชัดพอจำแนกได้
       final XFile? image = await _picker.pickImage(
         source: source,
-        maxWidth: 1024,
-        maxHeight: 1024,
-        imageQuality: 80,
+        maxWidth: 768,
+        maxHeight: 768,
+        imageQuality: 70,
       );
       if (image == null) return;
 
@@ -127,47 +160,34 @@ class _ImageScanningState extends State<ImageScanning> {
         ),
       );
 
-      final model = GenerativeModel(model: 'gemini-3.6-flash', apiKey: _apiKey);
+      // ให้ Gemini ตอบตามแบบฟอร์ม (structured output) แทนการอธิบายรูปแบบ JSON
+      // ยาวๆ ใน prompt: prompt สั้นลง ตอบเร็วขึ้น และค่าที่ได้อยู่ในชุดที่กำหนด
+      // เสมอ (หมวดหมู่ / ประเภทอายุการเก็บรักษา / วิธีนับ) ไม่ต้องกลัว JSON เพี้ยน
+      // — Gemini ยังดูรูปแล้วเลือกประเภทเอง ความแม่นเท่าเดิม
       final imageBytes = await image.readAsBytes();
 
       final prompt = TextPart("""
-วิเคราะห์วัตถุดิบทั้งหมดในรูปภาพ (อาจมีหลายชิ้น)
-ตอบกลับมาเป็น JSON Array (List) เท่านั้น
-รูปแบบ:
-[
- {
-  "category":"หมวดหมู่",
-  "name":"ชื่อวัตถุดิบ",
-  "quantity":1,
-  "unit":"หน่วย",
-  "shelf_type":"chicken",
-  "fridge_days":2,
-  "freezer_days":120
- }
-]
-ห้ามมีข้อความอธิบายอื่น
-ห้ามมี Markdown ```json
-
-สำคัญ: ค่า "category" ต้องเลือกจากรายการนี้เท่านั้น ห้ามพิมพ์คำอื่นนอกเหนือจากนี้เด็ดขาด:
-${fixedCategories.join(", ")}
-
-ค่า "quantity" และ "unit" คือปริมาณที่เห็นจริงในรูป เช่น 1 แพ็ค, 2 หัว, 6 ฟอง, 500 กรัม
-(quantity เป็นตัวเลข ใช้ทศนิยมได้)
-
-ค่า "shelf_type" คือประเภทสำหรับคำนวณอายุการเก็บรักษา ให้เลือกคีย์จากรายการนี้
-ถ้าวัตถุดิบไม่ตรงกับประเภทไหนเลยให้ใส่ "other":
-${shelfTypePromptList()}
-
-ค่า "fridge_days" คือจำนวนวันที่วัตถุดิบนี้ (ในสภาพที่เห็นในรูป) เก็บในช่องปกติของตู้เย็นได้อย่างปลอดภัย
-ค่า "freezer_days" คือจำนวนวันที่เก็บในช่องแช่แข็งได้ ถ้าไม่ควรแช่แข็งให้ใส่ null
-ประเมินตามหลักความปลอดภัยของอาหารสำหรับชนิดนั้นจริงๆ เป็นตัวเลขจำนวนเต็ม
+วิเคราะห์วัตถุดิบทุกชิ้นในรูป
+- quantity/unit: ปริมาณที่เห็นจริง เช่น 1 แพ็ค, 6 ฟอง, 500 กรัม
+- count_mode: piece ถ้าเห็นเป็นลูก/ชิ้นแยกกันนับได้ชัดเจน (ไข่ มะเขือเทศ หัวหอม ผลไม้ ผักหัว ขวด กล่อง) ไม่งั้น portion (เนื้อสัตว์ ผักใบ ของลูกเล็กจำนวนมาก เช่น มะเขือเทศราชินีทั้งแพ็ค พริก อาหารเหลือ)
+- count/count_unit: จำนวนสำหรับหักใช้ ห้ามเป็นกรัม/มล. (portion ใช้ count_unit "ส่วน", 1 ส่วน = ทำอาหาร 1 ครั้ง)
+- shelf_type: ${shelfTypePromptList().replaceAll('\n', ', ')}, other = ไม่ตรงประเภทไหน
+- fridge_days/freezer_days: จำนวนวันที่เก็บได้อย่างปลอดภัยในสภาพที่เห็น (freezer_days = null ถ้าไม่ควรแช่แข็ง)
 """);
 
-      final response = await model
-          .generateContent([
-            Content.multi([prompt, DataPart('image/jpeg', imageBytes)]),
-          ])
-          .timeout(const Duration(seconds: 30));
+      // Gemini ตอบ 503 "high demand" ได้เป็นพักๆ ลองใหม่อัตโนมัติก่อนแจ้ง error
+      // และรอได้ถึง 60 วินาที (รูปที่มีหลายชิ้นอาจใช้เวลาเกิน 30 วินาที)
+      final response = await generateGemini(
+        apiKey: _apiKey,
+        content: [
+          Content.multi([prompt, DataPart('image/jpeg', imageBytes)]),
+        ],
+        generationConfig: GenerationConfig(
+          responseMimeType: 'application/json',
+          responseSchema: _scanSchema,
+        ),
+        timeout: const Duration(seconds: 60),
+      );
 
       if (mounted && Navigator.canPop(context)) {
         Navigator.pop(context);
@@ -218,7 +238,12 @@ ${shelfTypePromptList()}
       }
 
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error: $e"), backgroundColor: Colors.red),
+        SnackBar(
+          content: Text(
+            geminiErrorMessage(e, fallback: 'วิเคราะห์วัตถุดิบไม่สำเร็จ'),
+          ),
+          backgroundColor: Colors.red,
+        ),
       );
     }
   }

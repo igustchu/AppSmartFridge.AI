@@ -38,15 +38,65 @@ class ShelfType {
   /// true = ไม่ควรเก็บในช่องแช่แข็ง (เช่น ไข่) ผู้ใช้จะเลือกช่องแช่แข็งไม่ได้
   final bool noFreeze;
 
+  /// แหล่งอ้างอิงของข้อมูลประเภทนี้ (แสดงให้ผู้ใช้เห็นว่าตัวเลขมาจากไหน)
+  final String source;
+
   const ShelfType({
     required this.key,
     required this.label,
     required this.states,
     this.noFreeze = false,
+    this.source = _srcMeat,
   });
 
   List<String> get stateNames =>
       states.keys.where((s) => s.isNotEmpty).toList();
+}
+
+const String _srcMeat = 'springnews, The Beefchelor';
+const String _srcProcessed = 'springnews, The Beefchelor, SUPALAI';
+const String _srcProduce = 'Maeban, SUPALAI';
+
+/// หน่วยสำหรับ "นับเป็นชิ้น" (ของที่นับได้ ไม่ต้องชั่ง) — "แบ่งเป็นส่วน" ใช้
+/// หน่วย "ส่วน" ใช้ร่วมกันทั้งหน้าผลสแกนและหน้ารายละเอียด
+const List<String> pieceUnits = [
+  "ชิ้น",
+  "ฟอง",
+  "ผล",
+  "ลูก",
+  "หัว",
+  "ต้น",
+  "กำ",
+  "แพ็ค",
+  "ขวด",
+  "กล่อง",
+];
+
+const String portionUnit = 'ส่วน';
+
+/// shelf_type ที่บันทึกเมื่อผู้ใช้แก้ระยะที่เก็บได้เอง — เก็บเป็น
+/// "custom:<ประเภทเดิม>:<จำนวนวันเดิม>" เช่น "custom:egg:21" เพื่อจำที่มาเดิม
+/// ไว้ ถ้าผู้ใช้แก้กลับเป็นค่าเดิม จะได้คืนที่มาเดิมได้ (ค่าเก่าที่เป็นแค่
+/// "custom" เฉยๆ ถือว่าไม่รู้ที่มาเดิม)
+const String shelfTypeCustom = 'custom';
+
+/// สร้างค่า shelf_type สำหรับ "ผู้ใช้กำหนดเอง" โดยจำประเภทและจำนวนวันเดิมไว้
+String customShelfType(String? originalKey, num? originalDays) =>
+    '$shelfTypeCustom:${originalKey ?? ''}:${originalDays?.round() ?? ''}';
+
+bool isCustomShelfType(String? value) =>
+    value != null &&
+    (value == shelfTypeCustom || value.startsWith('$shelfTypeCustom:'));
+
+/// ที่มาเดิมก่อนผู้ใช้แก้ — key = ประเภทเดิม (null = AI ประเมิน), days =
+/// จำนวนวันเดิม (null = ไม่รู้) — ถ้าไม่ใช่ค่า custom คืนตัวเดิมกลับไป
+({String? key, int? days}) originalShelfSource(String? value, num? currentDays) {
+  if (!isCustomShelfType(value)) {
+    return (key: value, days: currentDays?.round());
+  }
+  final parts = value!.split(':');
+  String? at(int i) => parts.length > i && parts[i].isNotEmpty ? parts[i] : null;
+  return (key: at(1), days: int.tryParse(at(2) ?? ''));
 }
 
 const String stateRaw = 'ดิบ';
@@ -98,6 +148,7 @@ const List<ShelfType> shelfTypes = [
       stateUnopened: ShelfLife(fridgeMin: 14, freezer: 30),
       stateOpened: ShelfLife(fridgeMin: 7, freezer: 30),
     },
+    source: _srcProcessed,
   ),
   ShelfType(
     key: 'egg',
@@ -107,41 +158,49 @@ const List<ShelfType> shelfTypes = [
       stateCooked: ShelfLife(fridgeMin: 7),
     },
     noFreeze: true,
+    source: _srcProcessed,
   ),
   ShelfType(
     key: 'leftover',
     label: 'อาหารกินเหลือ',
     states: {'': ShelfLife(fridgeMin: 2)},
+    source: _srcProcessed,
   ),
   ShelfType(
     key: 'bread',
     label: 'ขนมปัง',
     states: {'': ShelfLife(fridgeMin: 3)},
+    source: _srcProcessed,
   ),
   ShelfType(
     key: 'leafy_veg',
     label: 'ผักใบ',
     states: {'': ShelfLife(fridgeMin: 3, fridgeMax: 5)},
+    source: _srcProduce,
   ),
   ShelfType(
     key: 'root_veg',
     label: 'ผักหัว',
     states: {'': ShelfLife(fridgeMin: 7, fridgeMax: 15)},
+    source: _srcProduce,
   ),
   ShelfType(
     key: 'fruit',
     label: 'ผลไม้',
     states: {'': ShelfLife(fridgeMin: 3, fridgeMax: 15, freezer: 90)},
+    source: _srcProduce,
   ),
   ShelfType(
     key: 'milk',
     label: 'นม',
     states: {'': ShelfLife(fridgeMin: 4)},
+    source: _srcProduce,
   ),
   ShelfType(
     key: 'yogurt',
     label: 'โยเกิร์ต',
     states: {'': ShelfLife(fridgeMin: 3)},
+    source: _srcProduce,
   ),
 ];
 
@@ -241,3 +300,70 @@ String formatShelfDays(int days) {
   if (days >= 60 && days % 30 == 0) return '${days ~/ 30} เดือน';
   return '$days วัน';
 }
+
+/// ที่มาของระยะที่เก็บได้แบบสั้น สำหรับแสดงบนการ์ดเลยโดยไม่ต้องกดดู
+/// (ใช้คำที่ผู้ใช้เข้าใจ ไม่พูดถึง "ตาราง" ที่เป็นเรื่องภายในระบบ)
+String shelfSourceShort(Map<String, dynamic> item) {
+  final key = item['shelf_type']?.toString();
+  if (isCustomShelfType(key)) {
+    final original = originalShelfSource(key, null).days;
+    return original == null
+        ? 'คุณกำหนดเอง'
+        : 'คุณกำหนดเอง (ค่าแนะนำ ${formatShelfDays(original)})';
+  }
+  final type = findShelfType(key);
+  if (type != null) return 'ข้อมูลจาก ${type.source}';
+  if (item['fridge_days'] != null) return 'AI ประเมินให้ ควรตรวจสอบอีกครั้ง';
+  return 'ไม่มีข้อมูลระยะที่เก็บได้';
+}
+
+/// ชนิดของเมื่อเกินระยะที่เก็บได้แล้ว: ไม่ควรเสี่ยง (ทิ้ง) / ตรวจด้วยตาได้
+enum OverdueKind { unsafe, produce, other }
+
+OverdueKind overdueKind(Map<String, dynamic> item) {
+  // ของที่ผู้ใช้แก้เอง ใช้ประเภทเดิมก่อนแก้
+  final key = originalShelfSource(item['shelf_type']?.toString(), null).key;
+  const unsafe = {
+    'chicken',
+    'beef_pork',
+    'ground_meat',
+    'offal',
+    'fish',
+    'shellfish',
+    'leftover',
+  };
+  const produce = {'leafy_veg', 'root_veg', 'fruit'};
+
+  if (findShelfType(key) != null) {
+    if (unsafe.contains(key) ||
+        (key == 'processed_meat' && item['food_state'] == stateOpened)) {
+      return OverdueKind.unsafe;
+    }
+    if (produce.contains(key)) return OverdueKind.produce;
+    return OverdueKind.other;
+  }
+  // ไม่รู้ประเภท (AI ประเมิน / ของเก่า) ดูจากหมวดหมู่แทน
+  final category = item['category']?.toString() ?? '';
+  if (category.contains('เนื้อ')) return OverdueKind.unsafe;
+  if (category.contains('ผัก') || category.contains('ผลไม้')) {
+    return OverdueKind.produce;
+  }
+  return OverdueKind.other;
+}
+
+/// คำแนะนำบนการ์ดเมื่อเกินระยะที่เก็บได้แล้ว แยกตามชนิดของ — เนื้อสัตว์/อาหาร
+/// ทะเล/อาหารกินเหลือไม่ควรเสี่ยง ส่วนผักผลไม้ตรวจด้วยตาได้
+String overdueAdvice(Map<String, dynamic> item) {
+  switch (overdueKind(item)) {
+    case OverdueKind.unsafe:
+      return 'ไม่ควรกินแล้ว เพื่อความปลอดภัยควรทิ้ง';
+    case OverdueKind.produce:
+      return 'ลองดูก่อน ถ้าไม่เน่า ไม่เละ ไม่ขึ้นรา ยังใช้ได้';
+    case OverdueKind.other:
+      return 'ตรวจกลิ่นและสภาพก่อนใช้ ถ้าผิดปกติควรทิ้ง';
+  }
+}
+
+/// ตรวจแล้วยังใช้ได้ ให้ต่อเวลาได้ไหม — ของที่ไม่ควรเสี่ยงไม่มีปุ่มนี้
+bool canExtendOverdue(Map<String, dynamic> item) =>
+    overdueKind(item) != OverdueKind.unsafe;

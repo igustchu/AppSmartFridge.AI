@@ -1,31 +1,67 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-/// นับว่าวัตถุดิบอยู่ในตู้เย็นมาแล้วกี่วัน โดยนับจากเวลาที่เพิ่มเข้าตู้เย็น
-/// (created_at) ครบทุก 24 ชั่วโมงนับเป็น 1 วัน (ยังไม่ถึง 24 ชั่วโมง = 0 วัน)
-int daysInFridge(dynamic createdAt) => hoursInFridge(createdAt) ~/ 24;
+/// นับว่าวัตถุดิบอยู่ในตู้เย็นมาแล้วกี่วัน ตามวันในปฏิทิน (ใส่วันนี้ = 0,
+/// ใส่เมื่อวาน = 1) — นับแบบเดียวกับวันหมดอายุ (daysUntilExpiry) เพื่อให้
+/// "อยู่มาแล้ว + เก็บได้อีก" เท่ากับ "เก็บได้" เสมอ ผู้ใช้ไม่งง
+int daysInFridge(dynamic createdAt) {
+  final added = parseCreatedAt(createdAt);
+  if (added == null) return 0;
+  final diff = _today().difference(_dayOf(added)).inDays;
+  return diff < 0 ? 0 : diff;
+}
+
+/// แปลงเวลาที่ฐานข้อมูลสร้างให้เอง (created_at) เป็นเวลาเครื่อง — Supabase
+/// เก็บ created_at เป็นเวลา UTC แต่ส่งกลับมาโดยไม่มีตัวบอก timezone (ไม่มี Z
+/// หรือ +00:00) ถ้า parse ตรงๆ Dart จะเข้าใจว่าเป็นเวลาไทย ทำให้นับเกินไป
+/// 7 ชั่วโมง จึงต้องบอกให้ชัดว่าเป็น UTC ก่อนแปลงเป็นเวลาเครื่อง
+DateTime? parseCreatedAt(dynamic raw) {
+  if (raw == null) return null;
+  var text = raw.toString().trim();
+  if (text.isEmpty) return null;
+  final hasTimezone = RegExp(r'(Z|[+-]\d{2}(:?\d{2})?)$').hasMatch(text);
+  if (!hasTimezone && text.contains(RegExp(r'[T ]\d{2}:'))) text = '${text}Z';
+  try {
+    return DateTime.parse(text).toLocal();
+  } catch (_) {
+    return null;
+  }
+}
+
+/// เวลาที่เอาเข้าตู้เย็น เช่น "23:00 น." — "" ถ้าไม่มีข้อมูล
+String addedTimeText(dynamic createdAt) {
+  final d = parseCreatedAt(createdAt);
+  if (d == null) return '';
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(d.hour)}:${two(d.minute)} น.';
+}
 
 /// เข้าตู้เย็นมาแล้วกี่ชั่วโมง
 int hoursInFridge(dynamic createdAt) {
-  final added = _parseLocal(createdAt);
+  final added = parseCreatedAt(createdAt);
   if (added == null) return 0;
   final diff = DateTime.now().difference(added).inHours;
   return diff < 0 ? 0 : diff;
 }
 
-/// ช่วงเวลาที่อยู่ในตู้เย็นแบบสั้น — ยังไม่ถึง 1 วันบอกเป็นชั่วโมง (เช่น
-/// "5 ชั่วโมง") ตั้งแต่ 1 วันขึ้นไปบอกเป็นวันอย่างเดียว (เช่น "3 วัน")
-String fridgeAgeDuration(dynamic createdAt) {
+/// อยู่ในตู้เย็นมาแล้วนานเท่าไหร่ แบบสั้น เช่น "อยู่มา 3 วัน" — ถ้าใส่วันนี้
+/// บอกเป็นชั่วโมงแทน เช่น "ใส่วันนี้ (5 ชั่วโมงที่แล้ว)" (แสดงชั่วโมงเฉพาะวัน
+/// เดียวกัน จึงไม่ขัดกับการนับวันตามปฏิทิน)
+String fridgeAgeShort(dynamic createdAt) {
   final days = daysInFridge(createdAt);
-  if (days > 0) return '$days วัน';
+  if (days > 0) return 'อยู่มา $days วัน';
   final hours = hoursInFridge(createdAt);
-  if (hours < 1) return 'ไม่ถึง 1 ชั่วโมง';
-  return '$hours ชั่วโมง';
+  if (hours < 1) return 'ใส่วันนี้ (เพิ่งใส่)';
+  return 'ใส่วันนี้ ($hours ชั่วโมงที่แล้ว)';
 }
 
-/// ข้อความบอกว่าอยู่ในตู้เย็นมาแล้วนานเท่าไหร่ ใช้แสดงผลในทุกหน้า — แสดง
-/// ตัวเลขเสมอ และถ้ายังไม่ครบวันจะบอกจำนวนชั่วโมงด้วย
-String fridgeAgeText(dynamic createdAt) =>
-    'อยู่ในตู้เย็นมาแล้ว ${fridgeAgeDuration(createdAt)}';
+/// ข้อความเต็ม ใช้แสดงผลในหน้าคลังและหน้ารายละเอียด
+String fridgeAgeText(dynamic createdAt) {
+  final days = daysInFridge(createdAt);
+  if (days > 0) return 'อยู่ในตู้เย็นมาแล้ว $days วัน';
+  final hours = hoursInFridge(createdAt);
+  if (hours < 1) return 'ใส่ตู้เย็นวันนี้ (เพิ่งใส่)';
+  return 'ใส่ตู้เย็นวันนี้ ($hours ชั่วโมงที่แล้ว)';
+}
 
 /// เหลืออีกกี่วันจะหมดอายุ นับเป็นวันตามปฏิทิน (หมดอายุวันนี้ = 0,
 /// พรุ่งนี้ = 1, หมดอายุไปแล้ว = ติดลบ) — null ถ้าไม่มีวันหมดอายุ
@@ -35,14 +71,9 @@ int? daysUntilExpiry(dynamic expiryDate) {
   return _dayOf(expiry).difference(_today()).inDays;
 }
 
-/// ข้อความป้ายวันหมดอายุ เช่น "หมดอายุพรุ่งนี้"
-String expiryText(int days) {
-  if (days < 0) return 'หมดอายุแล้ว ${-days} วัน';
-  if (days == 0) return 'หมดอายุวันนี้';
-  if (days == 1) return 'หมดอายุพรุ่งนี้';
-  if (days >= 60) return 'หมดอายุในอีก ${days ~/ 30} เดือน';
-  return 'หมดอายุในอีก $days วัน';
-}
+/// ข้อความป้ายบนการ์ด — ใช้คำเดียวกับทั้งแอป ("เก็บได้อีก X วัน" / "ครบกำหนด
+/// วันนี้" / "เกินมาแล้ว X วัน") แทนคำว่า "หมดอายุ"
+String expiryText(int days) => daysLeftText(days);
 
 /// ของที่ใช้หมดแล้ว (เหลือ 0 ชิ้น) ไม่ต้องนับ/เตือน เพราะไม่มีของเหลือแล้ว
 /// (ของที่ไม่มีระบุจำนวนไว้ ให้ถือว่ายังมีของอยู่ตามเดิม)
@@ -57,8 +88,8 @@ bool isUsedUp(Map<String, dynamic> item) {
 /// ถ้าหมดอายุวันเดียวกัน ลอตที่เข้าตู้เย็นก่อนมาก่อน — ใช้ทั้งตอนแสดงผลใน
 /// หน้าเช็คตู้เย็นและตอนเลือกลอตที่จะหักตอนทำอาหาร
 int compareFifo(Map<String, dynamic> a, Map<String, dynamic> b) {
-  final ea = daysUntilExpiry(a['expiry_date']);
-  final eb = daysUntilExpiry(b['expiry_date']);
+  final ea = daysLeft(a);
+  final eb = daysLeft(b);
   if (ea != null && eb != null && ea != eb) return ea.compareTo(eb);
   if (ea == null && eb != null) return 1;
   if (ea != null && eb == null) return -1;
@@ -78,13 +109,12 @@ DateTime _dayOf(DateTime d) => DateTime(d.year, d.month, d.day);
 
 DateTime _today() => _dayOf(DateTime.now());
 
-/// ค่าเริ่มต้นของ "อยู่ในตู้เย็นครบกี่วันถึงจะถือว่าอยู่นานแล้ว ควรรีบใช้"
-/// ถ้าผู้ใช้ยังไม่เคยตั้งค่าไว้ในหน้า notification_settings_screen.dart
-const int defaultOldItemDays = 7;
+/// ค่าเริ่มต้นของ "แจ้งเตือนล่วงหน้ากี่วันก่อนครบอายุการเก็บรักษา" ถ้าผู้ใช้
+/// ยังไม่เคยตั้งค่าไว้ในหน้า notification_settings_screen.dart
+const int defaultOldItemDays = 1;
 
-/// อ่านค่า "แจ้งเตือนเมื่ออยู่ในตู้เย็นครบกี่วัน" (notify_days) ที่ผู้ใช้ตั้งไว้
-/// ใน user_metadata ของ Supabase Auth — ใช้ร่วมกันในหน้าแจ้งเตือน, การแจ้ง
-/// เตือน push, เมนูอาหาร (AI) และแพลนอาหาร
+/// อ่านค่า "แจ้งเตือนล่วงหน้ากี่วันก่อนครบอายุการเก็บรักษา" (notify_days) ที่
+/// ผู้ใช้ตั้งไว้ใน user_metadata ของ Supabase Auth — ใช้กับการแจ้งเตือน push
 int readOldItemDays(User? user) {
   final saved = user?.userMetadata?['notify_days'];
   if (saved is int) return saved;
@@ -94,27 +124,89 @@ int readOldItemDays(User? user) {
   return defaultOldItemDays;
 }
 
-/// สัดส่วนของอายุการเก็บรักษาที่ถือว่า "ควรรีบใช้" แล้ว
-const double oldItemShelfRatio = 0.7;
-
-/// อยู่ในตู้เย็นครบกี่วันถึงจะถือว่าควรรีบใช้ สำหรับวัตถุดิบชิ้นนี้ — ใช้ค่าที่
-/// น้อยกว่าระหว่าง (1) จำนวนวันที่ผู้ใช้ตั้งไว้ กับ (2) 70% ของอายุการเก็บ
-/// รักษาของชิ้นนั้นตามช่องที่เก็บ (fridge_days/freezer_days) ของที่เน่าเร็ว
-/// อย่างเนื้อสัตว์จึงถูกเตือนเร็วกว่าของที่เก็บได้นานอย่างไข่ ส่วนของเก่าที่
-/// ไม่มีข้อมูลอายุการเก็บรักษาจะใช้จำนวนวันที่ผู้ใช้ตั้งไว้อย่างเดียว
-int oldThresholdFor(Map<String, dynamic> item, int userDays) {
+/// อายุการเก็บรักษา (วัน) ของวัตถุดิบชิ้นนี้ตามช่องที่เก็บ — null ถ้าไม่มีข้อมูล
+num? shelfDaysOf(Map<String, dynamic> item) {
   final raw = item['storage'] == 'freezer'
       ? item['freezer_days']
       : item['fridge_days'];
-  final shelfDays = raw is num ? raw : num.tryParse(raw?.toString() ?? '');
-  if (shelfDays == null || shelfDays <= 0) return userDays;
-  final byShelf = (shelfDays * oldItemShelfRatio).ceil().clamp(1, 1 << 30);
-  return byShelf < userDays ? byShelf : userDays;
+  final days = raw is num ? raw : num.tryParse(raw?.toString() ?? '');
+  return (days == null || days <= 0) ? null : days;
 }
 
-/// วัตถุดิบชิ้นนี้อยู่ในตู้เย็นนานจนควรรีบใช้แล้วหรือยัง (ของที่ใช้หมดแล้ว
-/// หรือไม่มีวันที่เข้าตู้เย็นไม่นับ)
-bool isOldItem(Map<String, dynamic> item, int userDays) {
+// ---------------------------------------------------------------------------
+// นับเป็นวันอย่างเดียว (ไม่ใช้เปอร์เซ็นต์): เก็บได้อีก X วัน → ครบกำหนดวันนี้ →
+// เกินมาแล้ว X วัน ใช้เหมือนกันทุกหน้า (เมนูอาหาร แพลน แจ้งเตือน push)
+// ---------------------------------------------------------------------------
+
+/// เก็บได้อีกกี่วัน = ระยะที่เก็บได้ − จำนวนวันที่อยู่ในตู้เย็นมาแล้ว (ตามวันใน
+/// ปฏิทิน) — คำนวณจาก "วันที่เข้าตู้เย็น + ระยะที่เก็บได้" ที่เดียวเสมอ ทุกหน้า
+/// (คลัง เมนูอาหาร แพลน แจ้งเตือน) จึงตรงกัน และ "อยู่มาแล้ว + เก็บได้อีก" =
+/// "เก็บได้" เสมอ (1 = พรุ่งนี้, 0 = ครบกำหนดวันนี้, ติดลบ = เกินมาแล้ว)
+/// ของเก่าที่ไม่มีข้อมูลระยะที่เก็บได้ ใช้วันหมดอายุที่บันทึกไว้แทน
+/// — null ถ้าไม่มีข้อมูลเลย
+int? daysLeft(Map<String, dynamic> item) {
+  final shelf = shelfDaysOf(item);
+  if (shelf != null && item['created_at'] != null) {
+    return shelf.floor() - daysInFridge(item['created_at']);
+  }
+  return daysUntilExpiry(item['expiry_date']);
+}
+
+/// วันหมดอายุ (วันในปฏิทิน) คิดแบบเดียวกับ daysLeft — ใช้แสดงวันที่ในหน้า
+/// รายละเอียด จะได้ตรงกับ "เก็บได้อีก X วัน" เสมอ
+DateTime? expiryDayOf(Map<String, dynamic> item) {
+  final left = daysLeft(item);
+  if (left == null) return null;
+  return _today().add(Duration(days: left));
+}
+
+/// "เก็บได้อีก 3 วัน" / "ครบกำหนดวันนี้" / "เกินมาแล้ว 2 วัน"
+String daysLeftText(int left) {
+  if (left > 0) {
+    if (left >= 60) return 'เก็บได้อีก ${left ~/ 30} เดือน';
+    return 'เก็บได้อีก $left วัน';
+  }
+  if (left == 0) return 'ครบกำหนดวันนี้';
+  return 'เกินมาแล้ว ${-left} วัน';
+}
+
+/// เกินระยะที่เก็บได้แล้ว — ไม่ควรเอาไปทำอาหาร (ไม่ส่งให้ AI ใช้)
+bool isOverdue(Map<String, dynamic> item) {
+  final left = daysLeft(item);
+  return left != null && left < 0;
+}
+
+/// ควรเอาไปทำอาหารก่อน: เหลือไม่เกิน [aheadDays] วัน (ค่า "แจ้งเตือนล่วงหน้า"
+/// ที่ผู้ใช้ตั้งไว้) และยังไม่เกินกำหนด
+bool shouldUseFirst(Map<String, dynamic> item, int aheadDays) {
   if (item['created_at'] == null || isUsedUp(item)) return false;
-  return daysInFridge(item['created_at']) >= oldThresholdFor(item, userDays);
+  final left = daysLeft(item);
+  return left != null && left >= 0 && left <= aheadDays;
+}
+
+/// ถึงเวลาแจ้งเตือนแล้วหรือยัง — เหลือไม่เกิน [aheadDays] วัน (รวมของที่เกิน
+/// กำหนดแล้วด้วย ผู้ใช้จะได้รู้และจัดการ)
+bool isDueForReminder(Map<String, dynamic> item, int aheadDays) {
+  if (item['created_at'] == null || isUsedUp(item)) return false;
+  final left = daysLeft(item);
+  return left != null && left <= aheadDays;
+}
+
+/// ข้อความในการแจ้งเตือน เช่น "ควรใช้ภายในพรุ่งนี้"
+String useWithinText(num remainingDays) {
+  final d = remainingDays.floor();
+  if (d <= 0) return 'ควรใช้วันนี้';
+  if (d == 1) return 'ควรใช้ภายในพรุ่งนี้';
+  return 'ควรใช้ภายใน $d วัน';
+}
+
+/// เรียงของที่เก็บได้อีกน้อยวันที่สุดขึ้นก่อน (เกินกำหนดมาก่อนสุด ไม่มีข้อมูล
+/// ไว้ท้าย) ถ้าเท่ากัน ของที่อยู่ในตู้เย็นนานกว่าขึ้นก่อน
+int compareDaysLeft(Map<String, dynamic> a, Map<String, dynamic> b) {
+  final la = daysLeft(a);
+  final lb = daysLeft(b);
+  if (la != null && lb != null && la != lb) return la.compareTo(lb);
+  if (la == null && lb != null) return 1;
+  if (la != null && lb == null) return -1;
+  return hoursInFridge(b['created_at']).compareTo(hoursInFridge(a['created_at']));
 }

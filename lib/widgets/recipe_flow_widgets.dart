@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'app_icons.dart';
+import '../utils/fridge_age.dart';
 
 /// วิดเจ็ตที่ใช้ร่วมกันในกลุ่มหน้า "สแกนสูตรอาหาร" ทั้ง 3 หน้า
 /// (คลังสูตรอาหาร / สแกนสูตรอาหาร / ผลการสแกนสูตรอาหาร)
@@ -231,7 +232,8 @@ class EditPillButton extends StatelessWidget {
 /// เช่น "5 นาทีที่แล้ว", "1 ชั่วโมงที่แล้ว" (ของจริงจากฐานข้อมูล ไม่ใช่ตัวเลข mock)
 String relativeTimeThai(String? createdAt) {
   if (createdAt == null || createdAt.isEmpty) return '-';
-  final dt = DateTime.tryParse(createdAt);
+  // created_at เป็นเวลา UTC ที่ไม่มีตัวบอก timezone (ดู parseCreatedAt)
+  final dt = parseCreatedAt(createdAt);
   if (dt == null) return '-';
   final diff = DateTime.now().difference(dt);
 

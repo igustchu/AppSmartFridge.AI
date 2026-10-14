@@ -6,8 +6,8 @@ import '../services/notification_service.dart';
 import '../widgets/app_icons.dart';
 import '../utils/fridge_age.dart';
 
-/// หน้า "ตั้งค่า" การแจ้งเตือนวัตถุดิบที่อยู่ในตู้เย็นนาน (ตามดีไซน์ใน Figma กลุ่ม "ALERT")
-/// เก็บค่า "แจ้งเตือนเมื่ออยู่ในตู้เย็นครบกี่วัน" ไว้ใน user_metadata ของ Supabase Auth
+/// หน้า "ตั้งค่า" การแจ้งเตือน (ตามดีไซน์ใน Figma กลุ่ม "ALERT") — เก็บค่า
+/// "แจ้งเตือนล่วงหน้ากี่วันก่อนครบอายุการเก็บรักษา" ไว้ใน user_metadata ของ Supabase Auth
 /// (แนวทางเดียวกับ first_name/last_name/phone ใน edit_profile_screen.dart)
 /// เพื่อไม่ต้องสร้างตารางใหม่หรือขอสิทธิ์ฐานข้อมูลเพิ่ม
 class NotificationSettingsScreen extends StatefulWidget {
@@ -22,7 +22,7 @@ class _NotificationSettingsScreenState
     extends State<NotificationSettingsScreen> {
   final supabase = Supabase.instance.client;
 
-  static const List<int> options = [3, 5, 7, 14];
+  static const List<int> options = [1, 3, 7, 14];
 
   int selected = defaultOldItemDays;
   bool dropdownOpen = false;
@@ -78,7 +78,7 @@ class _NotificationSettingsScreenState
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    "แจ้งเตือนเมื่ออยู่ในตู้เย็นครบ",
+                    "แจ้งเตือนล่วงหน้าก่อนครบอายุการเก็บรักษา",
                     style: TextStyle(
                       fontWeight: FontWeight.bold,
                       fontSize: 16,
@@ -89,8 +89,8 @@ class _NotificationSettingsScreenState
                   buildDropdown(),
                   const SizedBox(height: 8),
                   const Text(
-                    "ของที่เน่าเร็ว (เช่น เนื้อสัตว์ ผักใบ) จะเตือนเร็วกว่านี้ "
-                    "เมื่ออยู่มาครบ 70% ของอายุการเก็บรักษา",
+                    "เช่น ตั้ง 1 วัน: อกไก่ (เก็บได้ 2 วัน) จะเตือนตอนอยู่มา 1 วัน "
+                    "ส่วนไข่ (เก็บได้ 21 วัน) จะเตือนตอนอยู่มา 20 วัน",
                     style: TextStyle(fontSize: 13, color: Colors.black54),
                   ),
                   const SizedBox(height: 16),
